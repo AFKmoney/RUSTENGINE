@@ -1,0 +1,18 @@
+[package]
+name = "vortex_core"
+version = "0.1.0"
+edition = "2024"
+description = "SHA-256d mining engine with SIMD, midstate caching, and early termination"
+
+[dependencies]
+
+[features]
+default = []
+avx2 = []
+avx512 = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
