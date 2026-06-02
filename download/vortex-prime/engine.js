@@ -1,5 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // VORTEX PRIME — SHA-256 Engine with Round-by-Round Capture
+// Corrected implementation using DataView for big-endian reads
 // ═══════════════════════════════════════════════════════════
 
 const SHA256_K = new Uint32Array([
@@ -13,15 +14,7 @@ const SHA256_K = new Uint32Array([
   0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
 ]);
 
-function rotr(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
-function ch(x, y, z) { return ((x & y) ^ (~x & z)) >>> 0; }
-function maj(x, y, z) { return ((x & y) ^ (x & z) ^ (y & z)) >>> 0; }
-function sigma0(x) { return (rotr(x,2) ^ rotr(x,13) ^ rotr(x,22)) >>> 0; }
-function sigma1(x) { return (rotr(x,6) ^ rotr(x,11) ^ rotr(x,25)) >>> 0; }
-function gamma0(x) { return (rotr(x,7) ^ rotr(x,18) ^ (x >>> 3)) >>> 0; }
-function gamma1(x) { return (rotr(x,17) ^ rotr(x,19) ^ (x >>> 10)) >>> 0; }
-
-const SHA256_IV = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+const SHA256_IV = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
 
 class SHA256Engine {
   constructor() {
@@ -29,77 +22,65 @@ class SHA256Engine {
     this.messageSchedule = null;
   }
 
-  // Pad message to multiple of 512 bits
-  padMessage(msgBytes) {
-    const bitLen = msgBytes.length * 8;
-    const paddedLen = Math.ceil((msgBytes.length + 9) / 64) * 64;
-    const padded = new Uint8Array(paddedLen);
-    padded.set(msgBytes);
-    padded[msgBytes.length] = 0x80;
-    const lenOffset = paddedLen - 8;
-    for (let i = 7; i >= 0; i--) {
-      padded[lenOffset + 7 - i] = (bitLen >>> (i * 8)) & 0xff;
-    }
-    return padded;
-  }
-
   // Compute SHA-256 with full round-by-round state capture
   hashWithStates(inputBytes) {
     this.roundStates = [];
-    const padded = this.padMessage(inputBytes);
-    const blocks = padded.length / 64;
 
-    let H = new Uint32Array(SHA256_IV);
+    // Pad message
+    const msgLen = inputBytes.length;
+    const bitLen = msgLen * 8;
+    let paddedLen = msgLen + 1;
+    while (paddedLen % 64 !== 56) paddedLen++;
+    paddedLen += 8;
+    const padded = new Uint8Array(paddedLen);
+    padded.set(inputBytes);
+    padded[msgLen] = 0x80;
+    const view = new DataView(padded.buffer);
+    view.setUint32(paddedLen - 8, 0, false); // High 32 bits of length
+    view.setUint32(paddedLen - 4, bitLen, false); // Low 32 bits of length
 
-    for (let b = 0; b < blocks; b++) {
-      const W = new Uint32Array(64);
-      const block = padded.subarray(b * 64, (b + 1) * 64);
+    let h0=SHA256_IV[0], h1=SHA256_IV[1], h2=SHA256_IV[2], h3=SHA256_IV[3];
+    let h4=SHA256_IV[4], h5=SHA256_IV[5], h6=SHA256_IV[6], h7=SHA256_IV[7];
 
-      // Prepare message schedule
-      for (let t = 0; t < 16; t++) {
-        W[t] = (block[t*4] << 24) | (block[t*4+1] << 16) | (block[t*4+2] << 8) | block[t*4+3];
+    for (let offset = 0; offset < paddedLen; offset += 64) {
+      // Message schedule
+      const w = new Array(64);
+      for (let i = 0; i < 16; i++) {
+        w[i] = view.getUint32(offset + i * 4, false); // big-endian
       }
-      for (let t = 16; t < 64; t++) {
-        W[t] = (gamma1(W[t-2]) + W[t-7] + gamma0(W[t-15]) + W[t-16]) >>> 0;
+      for (let i = 16; i < 64; i++) {
+        const s0 = ((w[i-15] >>> 7) | (w[i-15] << 25)) ^ ((w[i-15] >>> 18) | (w[i-15] << 14)) ^ (w[i-15] >>> 3);
+        const s1 = ((w[i-2] >>> 17) | (w[i-2] << 15)) ^ ((w[i-2] >>> 19) | (w[i-2] << 13)) ^ (w[i-2] >>> 10);
+        w[i] = (w[i-16] + s0 + w[i-7] + s1) | 0;
       }
-      this.messageSchedule = W;
+      this.messageSchedule = w;
 
-      let a = H[0], b = H[1], c = H[2], d = H[3];
-      let e = H[4], f = H[5], g = H[6], hh = H[7];
-
+      let a=h0, b=h1, c=h2, d=h3, e=h4, f=h5, g=h6, h=h7;
       // Round 0 = initial state
-      this.roundStates.push(new Uint32Array([a, b, c, d, e, f, g, hh]));
+      this.roundStates.push(new Uint32Array([a>>>0, b>>>0, c>>>0, d>>>0, e>>>0, f>>>0, g>>>0, h>>>0]));
 
-      for (let t = 0; t < 64; t++) {
-        const T1 = (hh + sigma1(e) + ch(e,f,g) + SHA256_K[t] + W[t]) >>> 0;
-        const T2 = (sigma0(a) + maj(a,b,c)) >>> 0;
-        hh = g; g = f; f = e;
-        e = (d + T1) >>> 0;
-        d = c; c = b; b = a;
-        a = (T1 + T2) >>> 0;
-        this.roundStates.push(new Uint32Array([a, b, c, d, e, f, g, hh]));
+      for (let i = 0; i < 64; i++) {
+        const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+        const ch = (e & f) ^ (~e & g);
+        const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) | 0;
+        const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const temp2 = (S0 + maj) | 0;
+        h=g; g=f; f=e; e=(d+temp1)|0; d=c; c=b; b=a; a=(temp1+temp2)|0;
+        this.roundStates.push(new Uint32Array([a>>>0, b>>>0, c>>>0, d>>>0, e>>>0, f>>>0, g>>>0, h>>>0]));
       }
 
-      H[0] = (H[0] + a) >>> 0;
-      H[1] = (H[1] + b) >>> 0;
-      H[2] = (H[2] + c) >>> 0;
-      H[3] = (H[3] + d) >>> 0;
-      H[4] = (H[4] + e) >>> 0;
-      H[5] = (H[5] + f) >>> 0;
-      H[6] = (H[6] + g) >>> 0;
-      H[7] = (H[7] + hh) >>> 0;
+      h0=(h0+a)|0; h1=(h1+b)|0; h2=(h2+c)|0; h3=(h3+d)|0;
+      h4=(h4+e)|0; h5=(h5+f)|0; h6=(h6+g)|0; h7=(h7+h)|0;
     }
 
-    // Final state
+    // Final hash
     const hashBytes = new Uint8Array(32);
-    for (let i = 0; i < 8; i++) {
-      hashBytes[i*4]   = (H[i] >>> 24) & 0xff;
-      hashBytes[i*4+1] = (H[i] >>> 16) & 0xff;
-      hashBytes[i*4+2] = (H[i] >>> 8) & 0xff;
-      hashBytes[i*4+3] = H[i] & 0xff;
-    }
+    const hv = new DataView(hashBytes.buffer);
+    hv.setUint32(0,h0,false); hv.setUint32(4,h1,false); hv.setUint32(8,h2,false); hv.setUint32(12,h3,false);
+    hv.setUint32(16,h4,false); hv.setUint32(20,h5,false); hv.setUint32(24,h6,false); hv.setUint32(28,h7,false);
 
-    return { hash: hashBytes, hashHex: this.toHex(hashBytes), H, roundStates: this.roundStates, messageSchedule: this.messageSchedule };
+    return { hash: hashBytes, hashHex: this.toHex(hashBytes), H: [h0,h1,h2,h3,h4,h5,h6,h7], roundStates: this.roundStates, messageSchedule: this.messageSchedule };
   }
 
   // SHA-256d (double hash) as used in Bitcoin
