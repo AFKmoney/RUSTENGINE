@@ -7,7 +7,7 @@ import AnalysisDashboard from "@/components/analysis-dashboard";
 import InputPanel from "@/components/input-panel";
 import DiscreteFractalPanel from "@/components/discrete-fractal-panel";
 import BitcoinPipelinePanel from "@/components/bitcoin-pipeline-panel";
-import PuzzleAnalyzerPanel from "@/components/puzzle-analyzer-panel";
+import TargetInputPanel from "@/components/target-input-panel";
 import { computeFullAnalysis, findAvalanchePoint, WORD_NAMES } from "@/lib/diffusion-analyzer";
 import { verifySha256, hashToHex, sha256Full, getWordBit } from "@/lib/sha256-engine";
 import { computeFullDiscreteAnalysis } from "@/lib/discrete-fractal";
@@ -248,14 +248,15 @@ export default function Home() {
                 Bitcoin Pipeline
               </TabsTrigger>
               <TabsTrigger
-                value="puzzle"
-                className="text-[11px] px-4 h-10 rounded-none border-b-2 border-transparent data-[state=active]:border-purple-400 data-[state=active]:bg-transparent data-[state=active]:text-purple-400 data-[state=active]:shadow-none text-zinc-500 hover:text-zinc-300 transition-colors"
+                value="cible"
+                className="text-[11px] px-4 h-10 rounded-none border-b-2 border-transparent data-[state=active]:border-orange-400 data-[state=active]:bg-transparent data-[state=active]:text-orange-400 data-[state=active]:shadow-none text-zinc-500 hover:text-zinc-300 transition-colors"
               >
                 <svg className="w-3.5 h-3.5 mr-1.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="11" cy="11" r="8" />
-                  <path d="m21 21-4.3-4.3" />
+                  <circle cx="12" cy="12" r="10" />
+                  <circle cx="12" cy="12" r="6" />
+                  <circle cx="12" cy="12" r="2" />
                 </svg>
-                Puzzle Analyzer
+                CIBLE
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -483,8 +484,8 @@ export default function Home() {
           <BitcoinPipelinePanel />
         )}
 
-        {activeTab === "puzzle" && (
-          <PuzzleAnalyzerPanel />
+        {activeTab === "cible" && (
+          <TargetInputPanel />
         )}
       </main>
 
@@ -492,7 +493,7 @@ export default function Home() {
       <footer className="border-t border-zinc-800/50 mt-auto">
         <div className="max-w-7xl mx-auto px-4 py-3 text-center text-[9px] text-zinc-600 font-mono">
           VORTEX PRIME — SHA-256 Discrete Fractal Analysis Suite •
-          Avalanche Visualizer • Bitcoin Key Pipeline • Puzzle Analyzer • 64 rounds • 256 state bits
+          Avalanche Visualizer • Bitcoin Pipeline • CIBLE • 64 rounds • 256 state bits
         </div>
       </footer>
     </div>
