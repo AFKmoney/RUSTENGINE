@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VORTEX PRIME — Discrete Fractal Inversion</title>
+<title>VORTEX PRIME — Adresse Hash & Pubkey Analyser</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -13,25 +13,25 @@
     <div class="logo">
       <span class="logo-v">V</span>ORTEX <span class="logo-prime">PRIME</span>
     </div>
-    <div class="subtitle">Discrete Fractal Inversion Engine — SHA-256</div>
+    <div class="subtitle">Adresse Hash & Pubkey Analyser — Discrete Fractal Inversion</div>
   </header>
 
   <!-- Target Input Panel -->
   <section class="target-panel">
-    <h2 class="section-title">CIBLE — Input Manuel</h2>
+    <h2 class="section-title">CIBLE — Adresse & Pubkey</h2>
     <div class="input-row">
       <div class="input-group">
         <label>Public Key (compressée 66 hex / décompressée 130 hex)</label>
         <input type="text" id="pubkeyInput" placeholder="02 ou 03 + 64 hex chars" class="hex-input" spellcheck="false">
       </div>
       <div class="input-group">
-        <label>Adresse Bitcoin (optionnel — vérification)</label>
+        <label>Adresse Bitcoin (optionnel — vérification croisée)</label>
         <input type="text" id="addressInput" placeholder="1... ou 3... ou bc1..." class="hex-input" spellcheck="false">
       </div>
     </div>
     <div class="action-row">
-      <button id="btnInitInversion" class="btn-primary pulse">INITIALISER L'INVERSION</button>
-      <button id="btnRunBatch" class="btn-accent" disabled>LANCER RECHERCHE</button>
+      <button id="btnAnalyze" class="btn-primary pulse">ANALYSER & INIT INVERSION</button>
+      <button id="btnRunBatch" class="btn-accent" disabled>LANCER INVERSION</button>
       <button id="btnStop" class="btn-danger" disabled>ARRÊTER</button>
       <button id="btnReset" class="btn-secondary">RESET</button>
     </div>
@@ -40,19 +40,82 @@
 
   <!-- Main Tabs -->
   <nav class="tabs">
-    <button class="tab active" data-tab="inversion">INVERSION</button>
+    <button class="tab active" data-tab="analyser">ADRESSE & PUBKEY</button>
     <button class="tab" data-tab="avalanche">AVALANCHE</button>
     <button class="tab" data-tab="fractal">FRACTALES DISCRÈTES</button>
     <button class="tab" data-tab="resonance">RÉSONANCE</button>
   </nav>
 
-  <!-- Tab: INVERSION -->
-  <div id="tab-inversion" class="tab-content active">
-    <div class="inversion-grid">
-      <!-- Live Stats -->
-      <div class="panel stats-panel">
-        <h3>Statistiques Live</h3>
-        <div class="stat-grid">
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- Tab: ADRESSE & PUBKEY ANALYSER + INVERSION MODULE        -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <div id="tab-analyser" class="tab-content active">
+    <div class="analyser-grid">
+
+      <!-- Pipeline Bitcoin -->
+      <div class="panel pipeline-panel">
+        <h3>Pipeline Bitcoin — Dérivation</h3>
+        <div class="pipeline-flow">
+          <div class="pipeline-step">
+            <div class="pipeline-label">Public Key</div>
+            <div class="pipeline-value" id="pipePubkey">—</div>
+          </div>
+          <div class="pipeline-arrow">→ SHA-256 →</div>
+          <div class="pipeline-step">
+            <div class="pipeline-label">SHA-256(PubKey)</div>
+            <div class="pipeline-value hash" id="pipeSha256">—</div>
+          </div>
+          <div class="pipeline-arrow">→ RIPEMD-160 →</div>
+          <div class="pipeline-step">
+            <div class="pipeline-label">Hash160</div>
+            <div class="pipeline-value hash" id="pipeHash160">—</div>
+          </div>
+          <div class="pipeline-arrow">→ Base58 →</div>
+          <div class="pipeline-step">
+            <div class="pipeline-label">Adresse</div>
+            <div class="pipeline-value address" id="pipeAddress">—</div>
+          </div>
+        </div>
+        <div class="pipeline-verify" id="pipelineVerify"></div>
+      </div>
+
+      <!-- Fractal Signature du Hash Cible -->
+      <div class="panel signature-panel">
+        <h3>Signature Fractale du Hash Cible</h3>
+        <div class="sig-grid">
+          <div class="sig-item">
+            <span class="sig-label">Dim. Fractale</span>
+            <span class="sig-value" id="sigFractalDim">—</span>
+          </div>
+          <div class="sig-item">
+            <span class="sig-label">Platitude Spectrale</span>
+            <span class="sig-value" id="sigSpectralFlat">—</span>
+          </div>
+          <div class="sig-item">
+            <span class="sig-label">Auto-Similarité</span>
+            <span class="sig-value" id="sigSelfSim">—</span>
+          </div>
+          <div class="sig-item">
+            <span class="sig-label">Anomalies Résonance</span>
+            <span class="sig-value highlight" id="sigAnomalies">—</span>
+          </div>
+          <div class="sig-item">
+            <span class="sig-label">Rounds Faibles</span>
+            <span class="sig-value highlight" id="sigWeakRounds">—</span>
+          </div>
+          <div class="sig-item">
+            <span class="sig-label">Biais Spectral (mots)</span>
+            <span class="sig-value" id="sigSpectralBias">—</span>
+          </div>
+        </div>
+        <canvas id="signatureRadar" width="400" height="250"></canvas>
+      </div>
+
+      <!-- ═══ MODULE D'INVERSION ═══ -->
+      <div class="panel inversion-module">
+        <h3 class="inversion-title">MODULE D'INVERSION — Recherche Fractale Guidée</h3>
+
+        <div class="inv-stats-grid">
           <div class="stat-card">
             <span class="stat-label">Itérations</span>
             <span class="stat-value" id="statIterations">0</span>
@@ -70,46 +133,49 @@
             <span class="stat-value" id="statTrend">—</span>
           </div>
           <div class="stat-card">
-            <span class="stat-label">Corrélation Spectrale</span>
+            <span class="stat-label">Corr. Spectrale</span>
             <span class="stat-value" id="statSpectralCorr">—</span>
           </div>
           <div class="stat-card">
-            <span class="stat-label">Diff Résonance</span>
+            <span class="stat-label">Diff. Résonance</span>
             <span class="stat-value" id="statResDiff">—</span>
           </div>
         </div>
-      </div>
 
-      <!-- Target Hash -->
-      <div class="panel target-hash-panel">
-        <h3>Hash Cible (SHA-256 de la pubkey)</h3>
-        <div class="hash-display" id="targetHashDisplay">— en attente d'initialisation —</div>
-        <h3>Meilleur Candidat</h3>
-        <div class="hash-display candidate" id="bestCandidateDisplay">—</div>
-        <h3>Dernier Hash Testé</h3>
-        <div class="hash-display" id="lastHashDisplay">—</div>
-      </div>
+        <!-- Target & Best -->
+        <div class="hash-compare">
+          <div class="hash-row">
+            <span class="hash-label">HASH CIBLE:</span>
+            <span class="hash-val target" id="targetHashDisplay">— en attente —</span>
+          </div>
+          <div class="hash-row">
+            <span class="hash-label">MEILLEUR:</span>
+            <span class="hash-val best" id="bestCandidateDisplay">—</span>
+          </div>
+          <div class="hash-row">
+            <span class="hash-label">DERNIER:</span>
+            <span class="hash-val last" id="lastHashDisplay">—</span>
+          </div>
+        </div>
 
-      <!-- Convergence Chart -->
-      <div class="panel chart-panel">
-        <h3>Convergence — Distance Hamming</h3>
-        <canvas id="convergenceChart" width="800" height="300"></canvas>
-      </div>
+        <!-- Convergence Chart -->
+        <div class="chart-container">
+          <h4>Convergence — Distance Hamming</h4>
+          <canvas id="convergenceChart" width="800" height="250"></canvas>
+        </div>
 
-      <!-- Candidate Log -->
-      <div class="panel log-panel">
-        <h3>Journal des Candidats</h3>
+        <!-- Inversion Log -->
         <div class="log-container" id="candidateLog">
-          <div class="log-entry info">En attente d'initialisation...</div>
+          <div class="log-entry info">En attente d'analyse...</div>
         </div>
       </div>
+
     </div>
   </div>
 
   <!-- Tab: AVALANCHE -->
   <div id="tab-avalanche" class="tab-content">
     <div class="avalanche-grid">
-      <!-- Bit Grid -->
       <div class="panel grid-panel">
         <h3>Grille de Bits — État SHA-256 (8 mots × 32 bits)</h3>
         <div class="round-selector">
@@ -119,14 +185,10 @@
         </div>
         <canvas id="bitGrid" width="760" height="220"></canvas>
       </div>
-
-      <!-- Diffusion Curve -->
       <div class="panel diffusion-panel">
         <h3>Courbe de Diffusion (Avalanche)</h3>
         <canvas id="diffusionChart" width="800" height="300"></canvas>
       </div>
-
-      <!-- Heatmap -->
       <div class="panel heatmap-panel">
         <h3>Carte de Chaleur — Diffusion par Bit d'Entrée</h3>
         <canvas id="heatmapChart" width="800" height="300"></canvas>
@@ -137,7 +199,6 @@
   <!-- Tab: FRACTALES DISCRÈTES -->
   <div id="tab-fractal" class="tab-content">
     <div class="fractal-grid">
-      <!-- Box Counting -->
       <div class="panel">
         <h3>Dimension Fractale — Box-Counting sur {0,1}²⁵⁶</h3>
         <canvas id="boxCountingChart" width="600" height="300"></canvas>
@@ -145,8 +206,6 @@
           <span>Dimension estimée: <strong id="fractalDim">—</strong></span>
         </div>
       </div>
-
-      <!-- Walsh-Hadamard -->
       <div class="panel">
         <h3>Spectre Walsh-Hadamard</h3>
         <canvas id="walshChart" width="600" height="300"></canvas>
@@ -156,8 +215,6 @@
           <span>Corrélation max: <strong id="maxCorrelation">—</strong></span>
         </div>
       </div>
-
-      <!-- Self-Similarity -->
       <div class="panel">
         <h3>Auto-Similarité — Espace de Hamming</h3>
         <canvas id="selfSimChart" width="600" height="300"></canvas>
@@ -171,7 +228,6 @@
   <!-- Tab: RÉSONANCE -->
   <div id="tab-resonance" class="tab-content">
     <div class="resonance-grid">
-      <!-- Resonance Matrix -->
       <div class="panel">
         <h3>Scanner de Résonance — Anomalies (Round × Échelle)</h3>
         <canvas id="resonanceChart" width="800" height="400"></canvas>
@@ -181,8 +237,6 @@
           <span>Échelles faibles: <strong id="weakScales">—</strong></span>
         </div>
       </div>
-
-      <!-- Top Anomalies Table -->
       <div class="panel">
         <h3>Top Anomalies Détectées</h3>
         <table class="anomaly-table" id="anomalyTable">
@@ -202,7 +256,7 @@
 <script src="inversion.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════════
-// VORTEX PRIME — Main Application Controller
+// VORTEX PRIME — Adresse Hash & Pubkey Analyser
 // ═══════════════════════════════════════════════════════════
 
 let invEngine = null;
@@ -220,8 +274,8 @@ document.querySelectorAll('.tab').forEach(tab => {
   });
 });
 
-// ── INIT INVERSION ──
-document.getElementById('btnInitInversion').addEventListener('click', () => {
+// ── ANALYSER & INIT INVERSION ──
+document.getElementById('btnAnalyze').addEventListener('click', async () => {
   const pubkeyHex = document.getElementById('pubkeyInput').value.trim().replace(/\s/g, '');
   const address = document.getElementById('addressInput').value.trim();
 
@@ -230,16 +284,60 @@ document.getElementById('btnInitInversion').addEventListener('click', () => {
     return;
   }
 
-  showStatus('Initialisation de l\'inversion...', 'loading');
+  showStatus('Analyse de la pubkey & initialisation de l\'inversion...', 'loading');
 
-  // Use setTimeout to not block UI
-  setTimeout(() => {
+  setTimeout(async () => {
     try {
+      // ── 1. Pipeline Bitcoin ──
+      const pubkeyBytes = sha256Engine.hexToBytes(pubkeyHex);
+      const sha256Result = sha256Engine.hashWithStates(pubkeyBytes);
+      const sha256Hash = sha256Result.hashHex;
+
+      // RIPEMD-160(SHA-256(pubkey))
+      const hash160 = ripemd160Manual(sha256Result.hash);
+      const hash160Hex = Array.from(hash160).map(b => b.toString(16).padStart(2,'0')).join('');
+
+      // Compute address
+      let computedAddress = '';
+      try {
+        computedAddress = await secp256k1.pubkeyToAddress(pubkeyHex);
+      } catch(e) {
+        // Fallback: manual address generation
+        const versioned = new Uint8Array(21);
+        versioned[0] = 0x00;
+        versioned.set(hash160, 1);
+        const cs1 = new Uint8Array(await crypto.subtle.digest('SHA-256', versioned));
+        const cs2 = new Uint8Array(await crypto.subtle.digest('SHA-256', cs1));
+        const addr = new Uint8Array(25);
+        addr.set(versioned);
+        addr.set(cs2.subarray(0, 4), 21);
+        computedAddress = base58Encode(addr);
+      }
+
+      // Display pipeline
+      document.getElementById('pipePubkey').textContent = pubkeyHex.length > 40 ? pubkeyHex.slice(0,20) + '...' + pubkeyHex.slice(-20) : pubkeyHex;
+      document.getElementById('pipeSha256').textContent = sha256Hash;
+      document.getElementById('pipeHash160').textContent = hash160Hex;
+      document.getElementById('pipeAddress').textContent = computedAddress;
+
+      // Verify address match if provided
+      const verifyEl = document.getElementById('pipelineVerify');
+      if (address && computedAddress) {
+        if (address === computedAddress) {
+          verifyEl.innerHTML = '<span class="verify-ok">✓ Adresse vérifiée — correspond à la pubkey</span>';
+        } else {
+          verifyEl.innerHTML = '<span class="verify-fail">✗ Adresse ne correspond PAS à la pubkey (attendue: ' + computedAddress.slice(0,12) + '...)</span>';
+        }
+      } else if (computedAddress) {
+        verifyEl.innerHTML = '<span class="verify-info">Adresse dérivée: ' + computedAddress + '</span>';
+      }
+
+      // ── 2. Init Inversion Engine ──
       invEngine = new InversionEngine();
       initResult = invEngine.initTarget(pubkeyHex);
       convergenceData = [];
 
-      // Display results
+      // Display target hash
       document.getElementById('targetHashDisplay').textContent = initResult.targetHash;
       document.getElementById('bestCandidateDisplay').textContent = '—';
       document.getElementById('lastHashDisplay').textContent = '—';
@@ -248,18 +346,32 @@ document.getElementById('btnInitInversion').addEventListener('click', () => {
       document.getElementById('btnRunBatch').disabled = false;
       document.getElementById('btnStop').disabled = false;
 
+      // ── 3. Fractal Signature Display ──
+      const fr = initResult.fractalResult;
+      document.getElementById('sigFractalDim').textContent = fr.boxCounting.dimensions.length > 0
+        ? (fr.boxCounting.dimensions.reduce((a,d) => a + d.dimension, 0) / fr.boxCounting.dimensions.length).toFixed(4) : '—';
+      document.getElementById('sigSpectralFlat').textContent = fr.walshHadamard.spectralFlatness.toFixed(4);
+      document.getElementById('sigSelfSim').textContent = fr.selfSimilarity.similarity.toFixed(4);
+      document.getElementById('sigAnomalies').textContent = initResult.anomalyMap.topAnomalies.length.toString();
+      document.getElementById('sigWeakRounds').textContent = initResult.anomalyMap.weakRounds.join(', ') || 'aucun';
+      document.getElementById('sigSpectralBias').textContent = initResult.fractalResult.walshHadamard.spectra.filter(s => s.flatness > 2).length + ' mots';
+
+      // Draw signature radar
+      drawSignatureRadar(fr, initResult.anomalyMap);
+
       // Update fractal displays
-      updateFractalDisplays(initResult.fractalResult);
-      updateResonanceDisplays(initResult.fractalResult.resonance, initResult.anomalyMap);
+      updateFractalDisplays(fr);
+      updateResonanceDisplays(fr.resonance, initResult.anomalyMap);
 
       // Update avalanche for target
       updateAvalancheDisplay(pubkeyHex);
 
-      showStatus(`Inversion initialisée — Hash cible: ${initResult.targetHash.slice(0,16)}... — ${initResult.anomalyMap.topAnomalies.length} anomalies détectées — Score auto-similarité: ${initResult.selfSimScore.toFixed(4)}`, 'success');
+      showStatus(`Analyse complète — ${initResult.anomalyMap.topAnomalies.length} anomalies — Inversion prête`, 'success');
 
-      addLog('info', `Cible initialisée: SHA-256(${pubkeyHex.slice(0,20)}...) = ${initResult.targetHash.slice(0,32)}...`);
-      addLog('info', `Anomalies résonance: ${initResult.anomalyMap.topAnomalies.length} — Biais spectral: ${initResult.fractalResult.walshHadamard.spectra.filter(s => s.flatness > 2).length} mots`);
-      addLog('info', `Rounds faibles: ${initResult.anomalyMap.weakRounds.join(', ') || 'aucun'} — Échelles faibles: ${initResult.anomalyMap.weakScales.join(', ') || 'aucune'}`);
+      addLog('info', `Pubkey: ${pubkeyHex.slice(0,20)}... → SHA-256: ${sha256Hash.slice(0,32)}...`);
+      addLog('info', `Hash160: ${hash160Hex} — Adresse: ${computedAddress}`);
+      addLog('info', `Anomalies résonance: ${initResult.anomalyMap.topAnomalies.length} — Rounds faibles: ${initResult.anomalyMap.weakRounds.join(', ') || 'aucun'}`);
+      addLog('info', `Inversion initialisée — Hash cible: ${initResult.targetHash.slice(0,32)}...`);
 
     } catch (e) {
       showStatus('ERREUR: ' + e.message, 'error');
@@ -268,13 +380,13 @@ document.getElementById('btnInitInversion').addEventListener('click', () => {
   }, 50);
 });
 
-// ── RUN BATCH ──
+// ── RUN INVERSION ──
 document.getElementById('btnRunBatch').addEventListener('click', () => {
   if (!invEngine) return;
 
   document.getElementById('btnRunBatch').disabled = true;
   document.getElementById('btnStop').disabled = false;
-  addLog('info', 'Recherche lancée — 10000 itérations');
+  addLog('info', 'Inversion lancée — 10000 itérations');
 
   invEngine.runBatch(10000, (result) => {
     updateLiveStats();
@@ -292,7 +404,6 @@ document.getElementById('btnRunBatch').addEventListener('click', () => {
     }
   });
 
-  // Re-enable after batch
   setTimeout(() => {
     if (invEngine && !invEngine.running) {
       document.getElementById('btnRunBatch').disabled = false;
@@ -306,18 +417,21 @@ document.getElementById('btnStop').addEventListener('click', () => {
   if (invEngine) {
     invEngine.stop();
     document.getElementById('btnRunBatch').disabled = false;
-    addLog('warning', 'Recherche arrêtée');
+    addLog('warning', 'Inversion arrêtée');
   }
 });
 
 // ── RESET ──
 document.getElementById('btnReset').addEventListener('click', () => {
-  invEngine = null;
-  initResult = null;
-  convergenceData = [];
+  invEngine = null; initResult = null; convergenceData = [];
   document.getElementById('pubkeyInput').value = '';
   document.getElementById('addressInput').value = '';
-  document.getElementById('targetHashDisplay').textContent = '— en attente d\'initialisation —';
+  document.getElementById('pipePubkey').textContent = '—';
+  document.getElementById('pipeSha256').textContent = '—';
+  document.getElementById('pipeHash160').textContent = '—';
+  document.getElementById('pipeAddress').textContent = '—';
+  document.getElementById('pipelineVerify').innerHTML = '';
+  document.getElementById('targetHashDisplay').textContent = '— en attente —';
   document.getElementById('bestCandidateDisplay').textContent = '—';
   document.getElementById('lastHashDisplay').textContent = '—';
   document.getElementById('btnRunBatch').disabled = true;
@@ -328,10 +442,99 @@ document.getElementById('btnReset').addEventListener('click', () => {
   document.getElementById('statTrend').textContent = '—';
   document.getElementById('statSpectralCorr').textContent = '—';
   document.getElementById('statResDiff').textContent = '—';
-  document.getElementById('candidateLog').innerHTML = '<div class="log-entry info">En attente d\'initialisation...</div>';
+  ['sigFractalDim','sigSpectralFlat','sigSelfSim','sigAnomalies','sigWeakRounds','sigSpectralBias'].forEach(id => {
+    document.getElementById(id).textContent = '—';
+  });
+  document.getElementById('candidateLog').innerHTML = '<div class="log-entry info">En attente d\'analyse...</div>';
   document.getElementById('initStatus').classList.add('hidden');
   clearAllCharts();
 });
+
+// ── Signature Radar Chart ──
+function drawSignatureRadar(fr, anomalyMap) {
+  const canvas = document.getElementById('signatureRadar');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0a0e17';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W / 2, cy = H / 2 + 10, R = 90;
+
+  // 6 axes
+  const labels = ['Dim Fract.', 'Plat. Spect.', 'Auto-Sim.', 'Anomalies', 'Ronds Faib.', 'Biais Spect.'];
+  const rawValues = [
+    fr.boxCounting.dimensions.length > 0 ? fr.boxCounting.dimensions.reduce((a,d) => a+d.dimension,0) / fr.boxCounting.dimensions.length : 0,
+    fr.walshHadamard.spectralFlatness,
+    fr.selfSimilarity.similarity,
+    anomalyMap.topAnomalies.length / 10, // normalize
+    anomalyMap.weakRounds.length / 8,
+    fr.walshHadamard.spectra.filter(s => s.flatness > 2).length / 8
+  ];
+  // Normalize to 0-1
+  const maxVals = [256, 100, 1, 1, 1, 1]; // expected max per axis
+  const values = rawValues.map((v, i) => Math.min(1, v / maxVals[i]));
+
+  // Draw grid
+  ctx.strokeStyle = '#1a2540';
+  ctx.lineWidth = 1;
+  for (let ring = 1; ring <= 4; ring++) {
+    const r = R * ring / 4;
+    ctx.beginPath();
+    for (let i = 0; i <= 6; i++) {
+      const angle = (Math.PI * 2 * i / 6) - Math.PI / 2;
+      const x = cx + Math.cos(angle) * r;
+      const y = cy + Math.sin(angle) * r;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // Draw axes
+  for (let i = 0; i < 6; i++) {
+    const angle = (Math.PI * 2 * i / 6) - Math.PI / 2;
+    ctx.strokeStyle = '#1a2540';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(angle) * R, cy + Math.sin(angle) * R);
+    ctx.stroke();
+
+    // Labels
+    ctx.fillStyle = '#5a6580';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    const lx = cx + Math.cos(angle) * (R + 20);
+    const ly = cy + Math.sin(angle) * (R + 20);
+    ctx.fillText(labels[i], lx, ly + 3);
+  }
+
+  // Draw data polygon
+  ctx.beginPath();
+  for (let i = 0; i <= 6; i++) {
+    const idx = i % 6;
+    const angle = (Math.PI * 2 * idx / 6) - Math.PI / 2;
+    const r = R * values[idx];
+    const x = cx + Math.cos(angle) * r;
+    const y = cy + Math.sin(angle) * r;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0, 255, 136, 0.15)';
+  ctx.fill();
+  ctx.strokeStyle = '#00ff88';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Data points
+  for (let i = 0; i < 6; i++) {
+    const angle = (Math.PI * 2 * i / 6) - Math.PI / 2;
+    const r = R * values[i];
+    const x = cx + Math.cos(angle) * r;
+    const y = cy + Math.sin(angle) * r;
+    ctx.fillStyle = '#00ff88';
+    ctx.fillRect(x - 3, y - 3, 6, 6);
+  }
+}
 
 // ── Update Live Stats ──
 function updateLiveStats() {
@@ -361,31 +564,24 @@ function drawConvergenceChart() {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-
-  // Background
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
 
   if (convergenceData.length < 2) return;
 
-  const padding = { top: 30, right: 20, bottom: 40, left: 60 };
+  const padding = { top: 20, right: 20, bottom: 30, left: 50 };
   const plotW = W - padding.left - padding.right;
   const plotH = H - padding.top - padding.bottom;
-
   const maxIter = convergenceData[convergenceData.length - 1].iter;
   const maxY = 256;
 
-  // Grid
-  ctx.strokeStyle = '#1a2035';
-  ctx.lineWidth = 1;
-  for (let y = 0; y <= 256; y += 32) {
+  ctx.strokeStyle = '#1a2035'; ctx.lineWidth = 1;
+  for (let y = 0; y <= 256; y += 64) {
     const py = padding.top + plotH * (1 - y / maxY);
     ctx.beginPath(); ctx.moveTo(padding.left, py); ctx.lineTo(W - padding.right, py); ctx.stroke();
   }
 
-  // Hamming line
-  ctx.strokeStyle = '#00ff88';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 2;
   ctx.beginPath();
   for (let i = 0; i < convergenceData.length; i++) {
     const x = padding.left + (convergenceData[i].iter / maxIter) * plotW;
@@ -394,9 +590,7 @@ function drawConvergenceChart() {
   }
   ctx.stroke();
 
-  // Best hamming line
-  ctx.strokeStyle = '#ff4444';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#ff4444'; ctx.lineWidth = 2;
   ctx.beginPath();
   for (let i = 0; i < convergenceData.length; i++) {
     const x = padding.left + (convergenceData[i].iter / maxIter) * plotW;
@@ -405,44 +599,27 @@ function drawConvergenceChart() {
   }
   ctx.stroke();
 
-  // Labels
-  ctx.fillStyle = '#8892a4';
-  ctx.font = '12px monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText('Itérations', W / 2, H - 5);
-  ctx.save();
-  ctx.translate(15, H / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.fillText('Hamming Distance', 0, 0);
-  ctx.restore();
-
-  // Legend
-  ctx.fillStyle = '#00ff88'; ctx.fillRect(W - 180, 10, 12, 3);
-  ctx.fillStyle = '#8892a4'; ctx.fillText('Hamming', W - 130, 15);
-  ctx.fillStyle = '#ff4444'; ctx.fillRect(W - 180, 25, 12, 3);
-  ctx.fillStyle = '#8892a4'; ctx.fillText('Best', W - 130, 30);
+  ctx.fillStyle = '#8892a4'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('Itérations', W / 2, H - 3);
+  ctx.fillStyle = '#00ff88'; ctx.fillRect(W - 150, 5, 10, 3);
+  ctx.fillStyle = '#8892a4'; ctx.fillText('Hamming', W - 100, 10);
+  ctx.fillStyle = '#ff4444'; ctx.fillRect(W - 150, 18, 10, 3);
+  ctx.fillStyle = '#8892a4'; ctx.fillText('Best', W - 100, 23);
 }
 
 // ── Avalanche Display ──
 function updateAvalancheDisplay(pubkeyHex) {
   const pubkeyBytes = sha256Engine.hexToBytes(pubkeyHex);
   const avalanche = computeAvalanche(sha256Engine, pubkeyBytes);
-
-  // Draw diffusion curve
   drawDiffusionCurve(avalanche.avgDiffusion);
 
-  // Setup round slider for bit grid
   const slider = document.getElementById('roundSlider');
   slider.oninput = () => {
     const round = parseInt(slider.value);
     document.getElementById('roundLabel').textContent = round;
     drawBitGrid(avalanche.reference.roundStates[round]);
   };
-  if (avalanche.reference.roundStates.length > 0) {
-    drawBitGrid(avalanche.reference.roundStates[0]);
-  }
-
-  // Draw heatmap
+  if (avalanche.reference.roundStates.length > 0) drawBitGrid(avalanche.reference.roundStates[0]);
   drawAvalancheHeatmap(avalanche.results);
 }
 
@@ -453,40 +630,21 @@ function drawBitGrid(state) {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
-
   if (!state) return;
 
-  const cellW = 22, cellH = 22;
-  const startX = 30, startY = 10;
-
+  const cellW = 22, cellH = 22, startX = 30, startY = 10;
   for (let w = 0; w < 8; w++) {
-    // Word label
-    ctx.fillStyle = '#5a6580';
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'right';
+    ctx.fillStyle = '#5a6580'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
     ctx.fillText('W' + w, startX - 5, startY + w * cellH + 15);
-
     for (let b = 0; b < 32; b++) {
       const bit = (state[w] >>> (31 - b)) & 1;
-      const x = startX + b * cellW;
-      const y = startY + w * cellH;
-
+      const x = startX + b * cellW, y = startY + w * cellH;
       ctx.fillStyle = bit ? '#00ff88' : '#1a2035';
       ctx.fillRect(x + 1, y + 1, cellW - 2, cellH - 2);
-
       ctx.fillStyle = bit ? '#003322' : '#0a0e17';
-      ctx.font = '8px monospace';
-      ctx.textAlign = 'center';
+      ctx.font = '8px monospace'; ctx.textAlign = 'center';
       ctx.fillText(bit, x + cellW / 2, y + cellH / 2 + 3);
     }
-  }
-
-  // Bit position labels
-  ctx.fillStyle = '#5a6580';
-  ctx.font = '8px monospace';
-  ctx.textAlign = 'center';
-  for (let b = 0; b < 32; b += 4) {
-    ctx.fillText(b.toString(), startX + b * cellW + cellW / 2, startY + 8 * cellH + 12);
   }
 }
 
@@ -497,7 +655,6 @@ function drawDiffusionCurve(avgDiffusion) {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
-
   if (!avgDiffusion || avgDiffusion.length === 0) return;
 
   const padding = { top: 30, right: 20, bottom: 40, left: 60 };
@@ -505,9 +662,7 @@ function drawDiffusionCurve(avgDiffusion) {
   const plotH = H - padding.top - padding.bottom;
   const maxY = 256;
 
-  // Grid
-  ctx.strokeStyle = '#1a2035';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#1a2035'; ctx.lineWidth = 1;
   for (let y = 0; y <= 256; y += 64) {
     const py = padding.top + plotH * (1 - y / maxY);
     ctx.beginPath(); ctx.moveTo(padding.left, py); ctx.lineTo(W - padding.right, py); ctx.stroke();
@@ -515,18 +670,14 @@ function drawDiffusionCurve(avgDiffusion) {
     ctx.fillText(y.toString(), padding.left - 5, py + 4);
   }
 
-  // 50% line (avalanche criterion)
   const halfY = padding.top + plotH * (1 - 128 / maxY);
-  ctx.strokeStyle = '#ff444488';
-  ctx.setLineDash([5, 5]);
+  ctx.strokeStyle = '#ff444488'; ctx.setLineDash([5, 5]);
   ctx.beginPath(); ctx.moveTo(padding.left, halfY); ctx.lineTo(W - padding.right, halfY); ctx.stroke();
   ctx.setLineDash([]);
   ctx.fillStyle = '#ff4444'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
   ctx.fillText('50% (128 bits)', W - padding.right - 80, halfY - 5);
 
-  // Diffusion curve
-  ctx.strokeStyle = '#00ccff';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#00ccff'; ctx.lineWidth = 2;
   ctx.beginPath();
   for (let i = 0; i < avgDiffusion.length; i++) {
     const x = padding.left + (i / (avgDiffusion.length - 1)) * plotW;
@@ -535,22 +686,17 @@ function drawDiffusionCurve(avgDiffusion) {
   }
   ctx.stroke();
 
-  // Find avalanche wall
   let wallRound = 0;
-  for (let i = 0; i < avgDiffusion.length; i++) {
-    if (avgDiffusion[i] >= 128) { wallRound = i; break; }
-  }
+  for (let i = 0; i < avgDiffusion.length; i++) { if (avgDiffusion[i] >= 128) { wallRound = i; break; } }
   if (wallRound > 0) {
     const wallX = padding.left + (wallRound / (avgDiffusion.length - 1)) * plotW;
-    ctx.strokeStyle = '#ffaa0088';
-    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = '#ffaa0088'; ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(wallX, padding.top); ctx.lineTo(wallX, padding.top + plotH); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = '#ffaa00'; ctx.font = '10px monospace';
     ctx.fillText('Avalanche Wall R' + wallRound, wallX + 5, padding.top + 15);
   }
 
-  // Labels
   ctx.fillStyle = '#8892a4'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
   ctx.fillText('Round', W / 2, H - 5);
 }
@@ -562,7 +708,6 @@ function drawAvalancheHeatmap(results) {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
-
   if (!results || results.length === 0) return;
 
   const maxBits = Math.min(results.length, 256);
@@ -573,41 +718,27 @@ function drawAvalancheHeatmap(results) {
     const profile = results[bit].diffProfile;
     for (let round = 0; round < Math.min(profile.length, 65); round++) {
       const val = profile[round] / 256;
-      const r = Math.floor(val * 255);
-      const g = Math.floor((1 - val) * 100);
-      const b = Math.floor((1 - val) * 255);
-      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillStyle = `rgb(${Math.floor(val*255)},${Math.floor((1-val)*100)},${Math.floor((1-val)*255)})`;
       ctx.fillRect(30 + round * cellW, 10 + bit * cellH, cellW, cellH);
     }
   }
-
-  // Axis labels
   ctx.fillStyle = '#5a6580'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
   ctx.fillText('Round →', W / 2, H - 5);
-  ctx.save(); ctx.translate(10, H / 2); ctx.rotate(-Math.PI / 2);
-  ctx.fillText('Input Bit →', 0, 0); ctx.restore();
 }
 
 // ── Fractal Displays ──
 function updateFractalDisplays(fractal) {
   if (!fractal) return;
-
-  // Box counting
   const bc = fractal.boxCounting;
   drawBoxCountingChart(bc);
   if (bc.dimensions.length > 0) {
-    const avgDim = bc.dimensions.reduce((a, d) => a + d.dimension, 0) / bc.dimensions.length;
-    document.getElementById('fractalDim').textContent = avgDim.toFixed(4);
+    document.getElementById('fractalDim').textContent = (bc.dimensions.reduce((a,d) => a+d.dimension,0) / bc.dimensions.length).toFixed(4);
   }
-
-  // Walsh-Hadamard
   const wh = fractal.walshHadamard;
   drawWalshChart(wh);
   document.getElementById('spectralFlatness').textContent = wh.spectralFlatness.toFixed(4);
   document.getElementById('nonlinearity').textContent = wh.nonlinearity.toFixed(1);
   document.getElementById('maxCorrelation').textContent = wh.maxCorrelation.toFixed(1);
-
-  // Self-similarity
   const ss = fractal.selfSimilarity;
   drawSelfSimChart(ss);
   document.getElementById('selfSimScore').textContent = ss.similarity.toFixed(4);
@@ -620,48 +751,36 @@ function drawBoxCountingChart(bc) {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
-
   if (!bc.scales || bc.scales.length === 0) return;
 
   const padding = { top: 30, right: 20, bottom: 40, left: 70 };
   const plotW = W - padding.left - padding.right;
   const plotH = H - padding.top - padding.bottom;
-
-  // Log-log plot
   const logScales = bc.scales.map(s => Math.log2(s));
   const logCounts = bc.counts.map(c => Math.log2(Math.max(1, c)));
-
   const minX = Math.min(...logScales), maxX = Math.max(...logScales);
   const minY = Math.min(...logCounts), maxY = Math.max(...logCounts);
   const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
 
-  // Grid
   ctx.strokeStyle = '#1a2035'; ctx.lineWidth = 1;
   for (let i = 0; i <= 5; i++) {
     const y = padding.top + plotH * (1 - i / 5);
     ctx.beginPath(); ctx.moveTo(padding.left, y); ctx.lineTo(W - padding.right, y); ctx.stroke();
   }
 
-  // Data points + line
-  ctx.strokeStyle = '#ff6600';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
+  ctx.strokeStyle = '#ff6600'; ctx.lineWidth = 2; ctx.beginPath();
   for (let i = 0; i < logScales.length; i++) {
     const x = padding.left + ((logScales[i] - minX) / rangeX) * plotW;
     const y = padding.top + plotH * (1 - (logCounts[i] - minY) / rangeY);
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    // Point
-    ctx.fillStyle = '#ff6600';
-    ctx.fillRect(x - 3, y - 3, 6, 6);
+    ctx.fillStyle = '#ff6600'; ctx.fillRect(x - 3, y - 3, 6, 6);
   }
   ctx.stroke();
 
-  // Dimension annotations
   ctx.fillStyle = '#ff9944'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
   for (const dim of bc.dimensions) {
     ctx.fillText(`D ≈ ${dim.dimension.toFixed(3)} (ε=${dim.scale})`, padding.left + 10, padding.top + 20 + bc.dimensions.indexOf(dim) * 15);
   }
-
   ctx.fillStyle = '#8892a4'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
   ctx.fillText('log₂(Échelle)', W / 2, H - 5);
 }
@@ -673,37 +792,22 @@ function drawWalshChart(wh) {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
-
   if (!wh.spectra || wh.spectra.length === 0) return;
 
-  const colors = ['#00ff88', '#00ccff', '#ff6600', '#ff4444', '#aa44ff', '#ffff00', '#ff00ff', '#00ffff'];
+  const colors = ['#00ff88','#00ccff','#ff6600','#ff4444','#aa44ff','#ffff00','#ff00ff','#00ffff'];
   const padding = { top: 30, right: 20, bottom: 40, left: 60 };
   const plotW = W - padding.left - padding.right;
   const plotH = H - padding.top - padding.bottom;
-
-  // Find global max/min
   let globalMax = 0, globalMin = 0;
-  for (const s of wh.spectra) {
-    for (const v of s.values) {
-      if (v > globalMax) globalMax = v;
-      if (v < globalMin) globalMin = v;
-    }
-  }
+  for (const s of wh.spectra) for (const v of s.values) { if (v > globalMax) globalMax = v; if (v < globalMin) globalMin = v; }
   const range = (globalMax - globalMin) || 1;
 
-  // Grid
   ctx.strokeStyle = '#1a2035'; ctx.lineWidth = 1;
-  for (let i = 0; i <= 5; i++) {
-    const y = padding.top + plotH * (1 - i / 5);
-    ctx.beginPath(); ctx.moveTo(padding.left, y); ctx.lineTo(W - padding.right, y); ctx.stroke();
-  }
+  for (let i = 0; i <= 5; i++) { const y = padding.top + plotH * (1 - i / 5); ctx.beginPath(); ctx.moveTo(padding.left, y); ctx.lineTo(W - padding.right, y); ctx.stroke(); }
 
-  // Draw spectra for each word
   for (let w = 0; w < wh.spectra.length; w++) {
     const vals = wh.spectra[w].values;
-    ctx.strokeStyle = colors[w % colors.length];
-    ctx.lineWidth = 1;
-    ctx.globalAlpha = 0.7;
+    ctx.strokeStyle = colors[w % colors.length]; ctx.lineWidth = 1; ctx.globalAlpha = 0.7;
     ctx.beginPath();
     for (let i = 0; i < vals.length; i++) {
       const x = padding.left + (i / (vals.length - 1)) * plotW;
@@ -714,14 +818,10 @@ function drawWalshChart(wh) {
   }
   ctx.globalAlpha = 1.0;
 
-  // Legend
   ctx.font = '9px monospace';
   for (let w = 0; w < wh.spectra.length; w++) {
-    ctx.fillStyle = colors[w % colors.length];
-    ctx.fillRect(W - 100, 10 + w * 14, 8, 8);
-    ctx.fillStyle = '#8892a4';
-    ctx.textAlign = 'left';
-    ctx.fillText('W' + w, W - 88, 18 + w * 14);
+    ctx.fillStyle = colors[w % colors.length]; ctx.fillRect(W - 100, 10 + w * 14, 8, 8);
+    ctx.fillStyle = '#8892a4'; ctx.textAlign = 'left'; ctx.fillText('W' + w, W - 88, 18 + w * 14);
   }
 }
 
@@ -732,39 +832,30 @@ function drawSelfSimChart(ss) {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
-
   if (!ss.ratios || ss.ratios.length === 0) return;
 
   const padding = { top: 30, right: 20, bottom: 40, left: 60 };
   const plotW = W - padding.left - padding.right;
   const plotH = H - padding.top - padding.bottom;
-
-  // Bar chart of ratios
   const maxRatio = Math.max(...ss.ratios.map(r => r.ratio), 1);
   const barW = plotW / ss.ratios.length * 0.6;
+  const meanRatio = ss.ratios.reduce((a, r) => a + r.ratio, 0) / ss.ratios.length;
 
   for (let i = 0; i < ss.ratios.length; i++) {
     const x = padding.left + (i + 0.5) * (plotW / ss.ratios.length) - barW / 2;
     const h = (ss.ratios[i].ratio / maxRatio) * plotH;
     const y = padding.top + plotH - h;
-
-    // Color based on how close to self-similar (ratio ≈ constant)
-    const deviation = Math.abs(ss.ratios[i].ratio - ss.ratios.reduce((a, r) => a + r.ratio, 0) / ss.ratios.length);
+    const deviation = Math.abs(ss.ratios[i].ratio - meanRatio);
     ctx.fillStyle = deviation < 0.1 ? '#00ff88' : deviation < 0.3 ? '#ffaa00' : '#ff4444';
     ctx.fillRect(x, y, barW, h);
-
-    // Label
     ctx.fillStyle = '#8892a4'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
     ctx.fillText('s=' + ss.ratios[i].scale, x + barW / 2, padding.top + plotH + 15);
     ctx.fillText(ss.ratios[i].ratio.toFixed(3), x + barW / 2, y - 5);
   }
 
-  // Self-similarity line
   if (ss.ratios.length >= 2) {
-    const meanRatio = ss.ratios.reduce((a, r) => a + r.ratio, 0) / ss.ratios.length;
     const lineY = padding.top + plotH * (1 - meanRatio / maxRatio);
-    ctx.strokeStyle = '#ffffff44';
-    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = '#ffffff44'; ctx.setLineDash([5, 5]);
     ctx.beginPath(); ctx.moveTo(padding.left, lineY); ctx.lineTo(W - padding.right, lineY); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = '#8892a4'; ctx.textAlign = 'right';
@@ -775,8 +866,6 @@ function drawSelfSimChart(ss) {
 // ── Resonance Displays ──
 function updateResonanceDisplays(resonance, anomalyMap) {
   if (!resonance) return;
-
-  // Draw resonance heatmap
   const canvas = document.getElementById('resonanceChart');
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
@@ -787,7 +876,6 @@ function updateResonanceDisplays(resonance, anomalyMap) {
   const padding = { top: 40, right: 20, bottom: 60, left: 80 };
   const plotW = W - padding.left - padding.right;
   const plotH = H - padding.top - padding.bottom;
-
   const scales = resonance.scales || [];
   const matrix = resonance.matrix || [];
   if (matrix.length === 0 || scales.length === 0) return;
@@ -800,63 +888,26 @@ function updateResonanceDisplays(resonance, anomalyMap) {
     for (let s = 0; s < matrix[r].values.length; s++) {
       const val = matrix[r].values[s];
       const intensity = Math.min(1, val / Math.max(maxAnom, 3));
-
-      // Color: blue (low) → yellow (medium) → red (high anomaly)
       let red, green, blue;
-      if (intensity < 0.5) {
-        red = Math.floor(intensity * 2 * 255);
-        green = Math.floor(intensity * 2 * 200);
-        blue = Math.floor((1 - intensity * 2) * 100);
-      } else {
-        red = 255;
-        green = Math.floor((1 - (intensity - 0.5) * 2) * 200);
-        blue = 0;
-      }
-
+      if (intensity < 0.5) { red = Math.floor(intensity*2*255); green = Math.floor(intensity*2*200); blue = Math.floor((1-intensity*2)*100); }
+      else { red = 255; green = Math.floor((1-(intensity-0.5)*2)*200); blue = 0; }
       const x = padding.left + s * cellW;
       const y = padding.top + r * cellH;
       ctx.fillStyle = `rgb(${red},${green},${blue})`;
       ctx.fillRect(x + 1, y + 1, cellW - 2, cellH - 2);
-
-      // Anomaly threshold marker
-      if (val > 3) {
-        ctx.strokeStyle = '#ffffff88';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x + 1, y + 1, cellW - 2, cellH - 2);
-      }
+      if (val > 3) { ctx.strokeStyle = '#ffffff88'; ctx.lineWidth = 1; ctx.strokeRect(x + 1, y + 1, cellW - 2, cellH - 2); }
     }
   }
 
-  // Y-axis labels (rounds)
   ctx.fillStyle = '#8892a4'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
-  for (let r = 0; r < matrix.length; r++) {
-    ctx.fillText(matrix[r].round, padding.left - 5, padding.top + r * cellH + cellH / 2 + 3);
-  }
-
-  // X-axis labels (scales)
+  for (let r = 0; r < matrix.length; r++) ctx.fillText(matrix[r].round, padding.left - 5, padding.top + r * cellH + cellH / 2 + 3);
   ctx.textAlign = 'center';
-  for (let s = 0; s < scales.length; s++) {
-    ctx.fillText('ε=' + scales[s], padding.left + s * cellW + cellW / 2, padding.top + plotH + 15);
-  }
+  for (let s = 0; s < scales.length; s++) ctx.fillText('ε=' + scales[s], padding.left + s * cellW + cellW / 2, padding.top + plotH + 15);
 
-  // Color bar
-  const barW = 15, barH = plotH;
-  const barX = W - 15;
-  for (let i = 0; i < barH; i++) {
-    const t = 1 - i / barH;
-    let r, g, b;
-    if (t < 0.5) { r = Math.floor(t*2*255); g = Math.floor(t*2*200); b = Math.floor((1-t*2)*100); }
-    else { r = 255; g = Math.floor((1-(t-0.5)*2)*200); b = 0; }
-    ctx.fillStyle = `rgb(${r},${g},${b})`;
-    ctx.fillRect(barX, padding.top + i, barW, 1);
-  }
-
-  // Update metrics
   document.getElementById('maxAnomaly').textContent = resonance.maxAnomaly.toFixed(3);
   document.getElementById('weakRounds').textContent = anomalyMap.weakRounds.join(', ') || 'aucun';
   document.getElementById('weakScales').textContent = anomalyMap.weakScales.join(', ') || 'aucune';
 
-  // Anomaly table
   const tbody = document.getElementById('anomalyTableBody');
   tbody.innerHTML = '';
   if (anomalyMap.topAnomalies.length === 0) {
@@ -883,19 +934,16 @@ function addLog(type, msg) {
   const log = document.getElementById('candidateLog');
   const entry = document.createElement('div');
   entry.className = 'log-entry ' + type;
-  const time = new Date().toLocaleTimeString();
-  entry.textContent = `[${time}] ${msg}`;
+  entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
   log.insertBefore(entry, log.firstChild);
-
-  // Limit log size
   while (log.children.length > 200) log.removeChild(log.lastChild);
 }
 
 function clearAllCharts() {
   ['convergenceChart','bitGrid','diffusionChart','heatmapChart',
-   'boxCountingChart','walshChart','selfSimChart','resonanceChart'].forEach(id => {
+   'boxCountingChart','walshChart','selfSimChart','resonanceChart','signatureRadar'].forEach(id => {
     const c = document.getElementById(id);
-    if (c) { const ctx = c.getContext('2d'); ctx.clearRect(0, 0, c.width, c.height); ctx.fillStyle='#0a0e17'; ctx.fillRect(0,0,c.width,c.height); }
+    if (c) { const ctx = c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height); ctx.fillStyle='#0a0e17'; ctx.fillRect(0,0,c.width,c.height); }
   });
 }
 </script>
