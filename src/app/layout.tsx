@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VORTEX PRIME — SHA-256 Avalanche Visualizer",
-  description: "Interactive visualization of bit diffusion and avalanche effect in SHA-256 compression function",
-  keywords: ["SHA-256", "avalanche effect", "cryptography", "visualization", "diffusion"],
+  title: "VORTEX PRIME — Discrete Fractal Inversion Engine",
+  description: "Cryptanalytic research tool using discrete fractal analysis on SHA-256 with secp256k1 ECDLP solver",
+  keywords: ["SHA-256", "fractal", "cryptanalysis", "secp256k1", "ECDLP", "inversion"],
   authors: [{ name: "VORTEX PRIME" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",

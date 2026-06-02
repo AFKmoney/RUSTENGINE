@@ -579,10 +579,129 @@ canvas {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 
+/* ═══════════════════════════════════════════════════════════ */
+/* NEW: Range Input, Backend Status, Found Key                */
+/* ═══════════════════════════════════════════════════════════ */
+
+.input-row-range {
+  display: grid;
+  grid-template-columns: 120px 1fr 200px;
+  gap: 12px;
+  margin-bottom: 15px;
+  align-items: end;
+}
+
+.puzzle-input {
+  text-align: center;
+  font-size: 18px !important;
+  font-weight: 900;
+  color: var(--warning) !important;
+  padding: 8px !important;
+}
+
+.range-display {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
+.range-display sup {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+select.hex-input {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%235a6580' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+
+.backend-status {
+  font-size: 10px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.backend-status.connected {
+  color: var(--success);
+  background: #003322;
+  border: 1px solid #006644;
+}
+
+.backend-status.disconnected {
+  color: var(--danger);
+  background: #330011;
+  border: 1px solid #660022;
+  animation: blink 1.5s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.range-info-panel {
+  grid-column: 1 / -1;
+}
+
+/* Found Key Panel */
+.found-key-panel {
+  background: linear-gradient(135deg, #002211, #003322, #001a11);
+  border: 2px solid var(--success);
+  border-radius: 8px;
+  padding: 20px;
+  text-align: center;
+  margin-bottom: 15px;
+  box-shadow: 0 0 30px rgba(0, 255, 136, 0.2);
+  animation: glow-found 2s infinite;
+}
+
+.found-key-panel.hidden { display: none; }
+
+@keyframes glow-found {
+  0%, 100% { box-shadow: 0 0 15px rgba(0, 255, 136, 0.2); }
+  50% { box-shadow: 0 0 40px rgba(0, 255, 136, 0.4); }
+}
+
+.found-title {
+  color: var(--success) !important;
+  font-size: 16px !important;
+  letter-spacing: 4px !important;
+  margin-bottom: 12px !important;
+}
+
+.found-key-value {
+  font-family: monospace;
+  font-size: 20px;
+  font-weight: 900;
+  color: var(--success);
+  word-break: break-all;
+  padding: 10px;
+  background: var(--bg);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.found-key-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .input-row, .analyser-grid, .fractal-grid { grid-template-columns: 1fr; }
-  .input-row-3 { grid-template-columns: 1fr; }
+  .input-row-3, .input-row-range { grid-template-columns: 1fr; }
   .sig-grid, .inv-stats-grid { grid-template-columns: repeat(3, 1fr); }
   .pipeline-flow { flex-direction: column; align-items: flex-start; }
   .pipeline-arrow { display: none; }

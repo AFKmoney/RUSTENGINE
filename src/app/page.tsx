@@ -1,501 +1,546 @@
 'use client';
 
-import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import BitGrid from "@/components/bit-grid";
-import RoundControls from "@/components/round-controls";
-import AnalysisDashboard from "@/components/analysis-dashboard";
-import InputPanel from "@/components/input-panel";
-import DiscreteFractalPanel from "@/components/discrete-fractal-panel";
-import BitcoinPipelinePanel from "@/components/bitcoin-pipeline-panel";
-import TargetInputPanel from "@/components/target-input-panel";
-import { computeFullAnalysis, findAvalanchePoint, WORD_NAMES } from "@/lib/diffusion-analyzer";
-import { verifySha256, hashToHex, sha256Full, getWordBit } from "@/lib/sha256-engine";
-import { computeFullDiscreteAnalysis } from "@/lib/discrete-fractal";
-import type { DiffusionData } from "@/lib/diffusion-analyzer";
-import type { CompressionTrace } from "@/lib/sha256-engine";
-import type { FullDiscreteAnalysis } from "@/lib/discrete-fractal";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
-import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
+import { useEffect, useState, useRef, useCallback } from 'react';
+import type { Socket } from 'socket.io-client';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Badge } from '@/components/ui/badge';
 
-function generateRandomBlock(): Uint8Array {
-  const block = new Uint8Array(64);
-  crypto.getRandomValues(block);
-  return block;
+// ═══════════════════════════════════════════════════════════
+// VORTEX PRIME — Frontend v3
+// ═══════════════════════════════════════════════════════════
+
+type TabId = 'analyser' | 'avalanche' | 'fractal' | 'resonance' | 'inversion';
+
+interface LogEntry {
+  type: 'info' | 'success' | 'warning' | 'error';
+  msg: string;
+  time: string;
 }
 
-export default function Home() {
-  // Tab state
-  const [activeTab, setActiveTab] = useState("avalanche");
+interface AnalysisResult {
+  success: boolean;
+  target: { pubkey?: string; address?: string; sha256: string; hash160: string; verified?: boolean };
+  pipeline: { pubkey?: string; sha256: string; hash160: string; address?: string; verified?: boolean | null };
+  fractal: any;
+  avalanche: { wall: number };
+  range: { puzzleNum: number; nMin: string; nMax: string; rangeSize: string };
+}
 
-  // Core state (Avalanche Visualizer)
-  const [inputBlock, setInputBlock] = useState<Uint8Array>(() => {
-    const b = new Uint8Array(64);
-    for (let i = 0; i < 64; i++) b[i] = i;
-    return b;
-  });
-  const [flippedBitIndex, setFlippedBitIndex] = useState<number | null>(0);
-  const [currentRound, setCurrentRound] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1);
+export default function VortexPrime() {
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabId>('analyser');
+  const [pubkey, setPubkey] = useState('');
+  const [hash, setHash] = useState('');
+  const [address, setAddress] = useState('');
+  const [puzzleNum, setPuzzleNum] = useState(135);
+  const [strategy, setStrategy] = useState('all');
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [found, setFound] = useState(false);
+  const [privateKey, setPrivateKey] = useState('');
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [stats, setStats] = useState({ iterations: 0, kangarooSteps: 0, incrementalSteps: 0, elapsed: 0, keysPerSec: '0' });
+  const logRef = useRef<HTMLDivElement>(null);
+  const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
 
-  // Discrete Fractal Analysis state
-  const [fractalAnalysis, setFractalAnalysis] = useState<FullDiscreteAnalysis | null>(null);
-  const [isFractalLoading, setIsFractalLoading] = useState(false);
-  const [fractalProgress, setFractalProgress] = useState(0);
-  const [isFractalOpen, setIsFractalOpen] = useState(false);
-
-  // Verification result
-  const verificationResult = useMemo(() => verifySha256(), []);
-
+  // Connect socket.io
   useEffect(() => {
-    if (verificationResult.passed) {
-      console.log("SHA-256 verification passed ✓");
-    } else {
-      console.error("SHA-256 verification failed!", verificationResult.results);
-    }
-  }, [verificationResult]);
-
-  // Compute analysis whenever input or flipped bit changes
-  const analysis = useMemo(() => {
-    if (flippedBitIndex === null) return null;
-    return computeFullAnalysis(inputBlock, flippedBitIndex);
-  }, [inputBlock, flippedBitIndex]);
-
-  const diffusion: DiffusionData[] = useMemo(
-    () => analysis?.diffusion ?? [],
-    [analysis]
-  );
-
-  const baseTrace: CompressionTrace | null = useMemo(
-    () => analysis?.baseTrace ?? null,
-    [analysis]
-  );
-
-  const modifiedTrace: CompressionTrace | null = useMemo(
-    () => analysis?.modifiedTrace ?? null,
-    [analysis]
-  );
-
-  const roundState = useMemo(() => {
-    if (!modifiedTrace || currentRound < 0 || currentRound >= 64) return null;
-    return modifiedTrace.rounds[currentRound];
-  }, [modifiedTrace, currentRound]);
-
-  const currentDiffusion = useMemo(() => {
-    if (diffusion.length === 0 || currentRound < 0 || currentRound >= 64)
-      return null;
-    return diffusion[currentRound];
-  }, [diffusion, currentRound]);
-
-  const influencedBits = useMemo(() => {
-    if (!currentDiffusion) return new Set<string>();
-    const set = new Set<string>();
-    for (let w = 0; w < 8; w++) {
-      for (let b = 0; b < 32; b++) {
-        if (currentDiffusion.bitDiffs[w][b]) {
-          set.add(`${w}-${b}`);
-        }
-      }
-    }
-    return set;
-  }, [currentDiffusion]);
-
-  // Auto-play animation
-  const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(() => {
-    if (isPlaying) {
-      const intervalMs = 1000 / speed;
-      playIntervalRef.current = setInterval(() => {
-        setCurrentRound((prev) => {
-          if (prev >= 63) {
-            setIsPlaying(false);
-            return 63;
-          }
-          return prev + 1;
-        });
-      }, intervalMs);
-    } else {
-      if (playIntervalRef.current) {
-        clearInterval(playIntervalRef.current);
-        playIntervalRef.current = null;
-      }
-    }
-    return () => {
-      if (playIntervalRef.current) {
-        clearInterval(playIntervalRef.current);
-      }
-    };
-  }, [isPlaying, speed]);
-
-  // Handlers
-  const handlePlayPause = useCallback(() => {
-    setIsPlaying((prev) => !prev);
-  }, []);
-
-  const handleStepForward = useCallback(() => {
-    setCurrentRound((prev) => Math.min(prev + 1, 63));
-  }, []);
-
-  const handleStepBackward = useCallback(() => {
-    setCurrentRound((prev) => Math.max(prev - 1, 0));
-  }, []);
-
-  const handleFlipBit = useCallback((bitIndex: number | null) => {
-    setFlippedBitIndex(bitIndex);
-    setCurrentRound(0);
-    setIsPlaying(false);
-  }, []);
-
-  const handleInputBlockChange = useCallback((block: Uint8Array) => {
-    setInputBlock(block);
-    setCurrentRound(0);
-    setIsPlaying(false);
-    setFractalAnalysis(null);
-  }, []);
-
-  const handleRunFractalAnalysis = useCallback(() => {
-    setIsFractalLoading(true);
-    setFractalProgress(0);
-    setIsFractalOpen(true);
-
-    setTimeout(() => {
-      const result = computeFullDiscreteAnalysis(inputBlock, (pct) => {
-        setFractalProgress(pct);
+    let s: Socket;
+    (async () => {
+      const { io } = await import('socket.io-client');
+      s = io('/?XTransformPort=3003', {
+        transports: ['websocket', 'polling'],
+        forceNew: true, reconnection: true, reconnectionAttempts: 10, reconnectionDelay: 2000, timeout: 15000
       });
-      setFractalAnalysis(result);
-      setIsFractalLoading(false);
-      setFractalProgress(100);
-    }, 50);
-  }, [inputBlock]);
+      setSocket(s);
 
-  const finalHash = useMemo(() => {
-    try {
-      if (analysis?.baseTrace) {
-        return hashToHex(analysis.baseTrace.finalState);
+    s.on('connect', () => { setConnected(true); addLog('success', 'Backend connecté'); });
+    s.on('disconnect', () => { setConnected(false); addLog('warning', 'Backend déconnecté'); });
+
+    s.on('analysis-result', (data: AnalysisResult) => {
+      setAnalysis(data);
+      addLog('success', `Analyse terminée — Puzzle #${data.range.puzzleNum} — ${data.fractal.topAnomalies?.length || 0} anomalies`);
+      setTimeout(() => drawAllCharts(data), 100);
+    });
+
+    s.on('inversion-started', (data: any) => {
+      setRunning(true); setFound(false);
+      addLog('success', `Inversion lancée — Puzzle #${data.puzzleNum} — ${data.strategy}`);
+    });
+
+    s.on('progress', (data: any) => {
+      if (data.type === 'kangaroo') {
+        addLog('info', `[Kangaroo ${data.phase || ''}] Step ${(data.step || 0).toLocaleString()} | ${data.rate || 0} steps/s${data.traps ? ` | Traps: ${data.traps.toLocaleString()}` : ''}`);
+      } else if (data.type === 'incremental') {
+        addLog('info', `[Incremental] ${(data.step || 0).toLocaleString()} / ${(data.count || 0).toLocaleString()} | ${data.rate || 0} keys/s`);
+      } else if (data.type === 'fractal-guided') {
+        addLog('info', `[Fractal] ${(data.checked || 0).toLocaleString()} | ${data.rate || 0} keys/s`);
       }
-      return "";
-    } catch {
-      return "";
-    }
-  }, [analysis]);
+    });
 
-  const modifiedHash = useMemo(() => {
-    if (analysis?.modifiedTrace) {
-      return hashToHex(analysis.modifiedTrace.finalState);
+    s.on('found', (data: any) => {
+      setFound(true); setPrivateKey(data.privateKey); setRunning(false);
+      addLog('success', `★★★ CLÉ PRIVÉE TROUVÉE ★★★ — ${data.privateKey} (${data.strategy})`);
+    });
+
+    s.on('inversion-stopped', () => { setRunning(false); addLog('warning', 'Inversion arrêtée'); });
+    s.on('inversion-complete', () => { setRunning(false); addLog('info', 'Inversion terminée'); });
+    s.on('error', (data: any) => { addLog('error', data.message); });
+    })();
+
+    return () => { if (s) s.disconnect(); };
+  }, []);
+
+  // Periodic stats update
+  useEffect(() => {
+    if (!running) return;
+    const interval = setInterval(() => {
+      // Request status from socket
+      if (socket?.connected) {
+        socket.emit('get-stats');
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [running, socket]);
+
+  const addLog = useCallback((type: LogEntry['type'], msg: string) => {
+    const time = new Date().toLocaleTimeString();
+    setLogs(prev => [...prev.slice(-200), { type, msg, time }]);
+  }, []);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
+
+  // ── Actions ──
+  const handleAnalyze = () => {
+    if (!pubkey && !hash && !address) { addLog('error', 'Entrez au moins une pubkey, hash ou adresse'); return; }
+    socket?.emit('analyze', { pubkey: pubkey || undefined, hash: hash || undefined, address: address || undefined, puzzleNum });
+    addLog('info', 'Analyse en cours via backend...');
+  };
+
+  const handleStartInversion = () => {
+    if (!analysis) { addLog('error', 'Analysez une cible d\'abord'); return; }
+    socket?.emit('start-inversion', { puzzleNum, strategy });
+  };
+
+  const handleStop = () => {
+    socket?.emit('stop-inversion');
+  };
+
+  const handleReset = () => {
+    setPubkey(''); setHash(''); setAddress(''); setAnalysis(null); setFound(false); setPrivateKey('');
+    setRunning(false); setLogs([]); setStats({ iterations: 0, kangarooSteps: 0, incrementalSteps: 0, elapsed: 0, keysPerSec: '0' });
+  };
+
+  // ── Chart Drawing ──
+  const drawAllCharts = (data: AnalysisResult) => {
+    drawSignatureRadar(data.fractal);
+    drawBoxCounting(data.fractal.boxCounting);
+    drawWalsh(data.fractal.walshHadamard);
+    drawSelfSim(data.fractal.selfSimData);
+    drawResonance(data.fractal.resonance);
+  };
+
+  const getCanvas = (id: string) => canvasRefs.current[id];
+
+  const drawSignatureRadar = (fr: any) => {
+    const canvas = getCanvas('signatureRadar'); if (!canvas) return;
+    const ctx = canvas.getContext('2d'); if (!ctx) return;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H); ctx.fillStyle = '#0a0e17'; ctx.fillRect(0, 0, W, H);
+    const cx = W / 2, cy = H / 2 + 10, R = 90;
+    const labels = ['Dim Fract.', 'Plat. Spect.', 'Auto-Sim.', 'Anomalies', 'Ronds Faib.', 'Biais Spect.'];
+    const rawValues = [fr.dimension || 0, fr.spectralFlatness || 0, fr.selfSimilarity || 0, (fr.topAnomalies || []).length / 10, (fr.anomalyRounds || []).length / 8, (fr.biasedWords || []).length / 8];
+    const maxVals = [256, 100, 1, 1, 1, 1];
+    const values = rawValues.map((v: number, i: number) => Math.min(1, v / maxVals[i]));
+    ctx.strokeStyle = '#1a2540'; ctx.lineWidth = 1;
+    for (let ring = 1; ring <= 4; ring++) { const r = R * ring / 4; ctx.beginPath(); for (let i = 0; i <= 6; i++) { const a = (Math.PI * 2 * i / 6) - Math.PI / 2; ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r); } ctx.stroke(); }
+    for (let i = 0; i < 6; i++) { const a = (Math.PI * 2 * i / 6) - Math.PI / 2; ctx.strokeStyle = '#1a2540'; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R); ctx.stroke(); ctx.fillStyle = '#5a6580'; ctx.font = '9px monospace'; ctx.textAlign = 'center'; ctx.fillText(labels[i], cx + Math.cos(a) * (R + 20), cy + Math.sin(a) * (R + 20) + 3); }
+    ctx.beginPath();
+    for (let i = 0; i <= 6; i++) { const idx = i % 6; const a = (Math.PI * 2 * idx / 6) - Math.PI / 2; const r = R * values[idx]; ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r); }
+    ctx.closePath(); ctx.fillStyle = 'rgba(0, 255, 136, 0.15)'; ctx.fill(); ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 2; ctx.stroke();
+  };
+
+  const drawBoxCounting = (bc: any) => {
+    const canvas = getCanvas('boxCounting'); if (!canvas || !bc?.scales) return;
+    const ctx = canvas.getContext('2d'); if (!ctx) return;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H); ctx.fillStyle = '#0a0e17'; ctx.fillRect(0, 0, W, H);
+    const pad = { top: 30, right: 20, bottom: 40, left: 70 };
+    const pW = W - pad.left - pad.right, pH = H - pad.top - pad.bottom;
+    const logS = bc.scales.map((s: number) => Math.log2(s)), logC = bc.counts.map((c: number) => Math.log2(Math.max(1, c)));
+    const minX = Math.min(...logS), maxX = Math.max(...logS), minY = Math.min(...logC), maxY = Math.max(...logC);
+    const rX = maxX - minX || 1, rY = maxY - minY || 1;
+    ctx.strokeStyle = '#ff6600'; ctx.lineWidth = 2; ctx.beginPath();
+    for (let i = 0; i < logS.length; i++) {
+      const x = pad.left + ((logS[i] - minX) / rX) * pW, y = pad.top + pH * (1 - (logC[i] - minY) / rY);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); ctx.fillStyle = '#ff6600'; ctx.fillRect(x - 3, y - 3, 6, 6);
     }
-    return "";
-  }, [analysis]);
+    ctx.stroke();
+    if (bc.dimensions) { ctx.fillStyle = '#ff9944'; ctx.font = '10px monospace'; ctx.textAlign = 'left'; bc.dimensions.forEach((d: any, i: number) => ctx.fillText(`D ≈ ${d.dimension.toFixed(3)} (ε=${d.scale})`, pad.left + 10, pad.top + 20 + i * 15)); }
+  };
+
+  const drawWalsh = (wh: any) => {
+    const canvas = getCanvas('walsh'); if (!canvas || !wh?.spectra) return;
+    const ctx = canvas.getContext('2d'); if (!ctx) return;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H); ctx.fillStyle = '#0a0e17'; ctx.fillRect(0, 0, W, H);
+    const colors = ['#00ff88','#00ccff','#ff6600','#ff4444','#aa44ff','#ffff00','#ff00ff','#00ffff'];
+    const pad = { top: 30, right: 20, bottom: 40, left: 60 };
+    const pW = W - pad.left - pad.right, pH = H - pad.top - pad.bottom;
+    let gMax = 0, gMin = 0;
+    for (const s of wh.spectra) for (const v of s.values) { if (v > gMax) gMax = v; if (v < gMin) gMin = v; }
+    const range = gMax - gMin || 1;
+    for (let w = 0; w < wh.spectra.length; w++) {
+      const vals = wh.spectra[w].values;
+      ctx.strokeStyle = colors[w % colors.length]; ctx.lineWidth = 1; ctx.globalAlpha = 0.7; ctx.beginPath();
+      for (let i = 0; i < vals.length; i++) { const x = pad.left + (i / (vals.length - 1)) * pW; const y = pad.top + pH * (1 - (vals[i] - gMin) / range); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1.0;
+  };
+
+  const drawSelfSim = (ss: any) => {
+    const canvas = getCanvas('selfSim'); if (!canvas || !ss?.ratios) return;
+    const ctx = canvas.getContext('2d'); if (!ctx) return;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H); ctx.fillStyle = '#0a0e17'; ctx.fillRect(0, 0, W, H);
+    const pad = { top: 30, right: 20, bottom: 40, left: 60 };
+    const pW = W - pad.left - pad.right, pH = H - pad.top - pad.bottom;
+    const maxR = Math.max(...ss.ratios.map((r: any) => r.ratio), 1);
+    const barW = pW / ss.ratios.length * 0.6;
+    const meanR = ss.ratios.reduce((a: number, r: any) => a + r.ratio, 0) / ss.ratios.length;
+    for (let i = 0; i < ss.ratios.length; i++) {
+      const x = pad.left + (i + 0.5) * (pW / ss.ratios.length) - barW / 2;
+      const h = (ss.ratios[i].ratio / maxR) * pH;
+      const dev = Math.abs(ss.ratios[i].ratio - meanR);
+      ctx.fillStyle = dev < 0.1 ? '#00ff88' : dev < 0.3 ? '#ffaa00' : '#ff4444';
+      ctx.fillRect(x, pad.top + pH - h, barW, h);
+    }
+  };
+
+  const drawResonance = (res: any) => {
+    const canvas = getCanvas('resonance'); if (!canvas || !res?.matrix) return;
+    const ctx = canvas.getContext('2d'); if (!ctx) return;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H); ctx.fillStyle = '#0a0e17'; ctx.fillRect(0, 0, W, H);
+    const pad = { top: 40, right: 20, bottom: 60, left: 80 };
+    const pW = W - pad.left - pad.right, pH = H - pad.top - pad.bottom;
+    const scales = res.scales || [], matrix = res.matrix || [];
+    if (!matrix.length || !scales.length) return;
+    const cW = pW / scales.length, cH = pH / matrix.length;
+    const maxA = res.maxAnomaly || 1;
+    for (let r = 0; r < matrix.length; r++) {
+      for (let s = 0; s < matrix[r].values.length; s++) {
+        const val = matrix[r].values[s];
+        const intensity = Math.min(1, val / Math.max(maxA, 3));
+        let red: number, green: number, blue: number;
+        if (intensity < 0.5) { red = Math.floor(intensity*2*255); green = Math.floor(intensity*2*200); blue = Math.floor((1-intensity*2)*100); }
+        else { red = 255; green = Math.floor((1-(intensity-0.5)*2)*200); blue = 0; }
+        ctx.fillStyle = `rgb(${red},${green},${blue})`;
+        ctx.fillRect(pad.left + s * cW + 1, pad.top + r * cH + 1, cW - 2, cH - 2);
+      }
+    }
+  };
+
+  const tabs: { id: TabId; label: string }[] = [
+    { id: 'analyser', label: 'ADRESSE & PUBKEY' },
+    { id: 'fractal', label: 'FRACTALES' },
+    { id: 'resonance', label: 'RÉSONANCE' },
+    { id: 'inversion', label: 'INVERSION LIVE' },
+  ];
+
+  const logColor = (type: string) => {
+    switch (type) {
+      case 'success': return 'text-green-400';
+      case 'error': return 'text-red-400';
+      case 'warning': return 'text-yellow-400';
+      default: return 'text-cyan-400';
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-zinc-100 flex flex-col">
+    <div className="min-h-screen bg-[#060a12] text-[#c8d0e0] font-mono text-[13px]">
       {/* Header */}
-      <header className="border-b border-zinc-800/80 bg-[#0c0c14]/90 backdrop-blur-sm sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-cyan-500 flex items-center justify-center text-black font-bold text-sm">
-              ⟐
-            </div>
-            <div>
-              <h1 className="text-base sm:text-lg font-bold tracking-tight">
-                <span className="text-emerald-400">VORTEX</span>{" "}
-                <span className="text-zinc-300">PRIME</span>
-              </h1>
-              <p className="text-[9px] sm:text-[10px] text-zinc-600 font-mono -mt-0.5">
-                SHA-256 Discrete Fractal Analysis Suite
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {verificationResult && (
-              <div
-                className={`text-[9px] font-mono px-2 py-0.5 rounded ${
-                  verificationResult.passed
-                    ? "bg-emerald-900/40 text-emerald-400"
-                    : "bg-red-900/40 text-red-400"
-                }`}
-              >
-                {verificationResult.passed ? "✓ SHA-256 Verified" : "✗ Verification Failed"}
-              </div>
-            )}
-          </div>
-        </div>
+      <header className="text-center py-5 border-b border-[#1a2540] mb-4">
+        <h1 className="text-3xl font-black tracking-[8px]">
+          <span className="text-[#00ff88]">V</span>ORTEX <span className="text-[#00ccff] text-xl align-super">PRIME</span>
+        </h1>
+        <p className="text-[11px] text-[#5a6580] tracking-[4px] mt-1">Discrete Fractal Inversion Engine — Backend v3</p>
       </header>
 
-      {/* Tab Navigation */}
-      <div className="border-b border-zinc-800/50 bg-[#0c0c14]/60">
-        <div className="max-w-7xl mx-auto px-4">
-          <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="bg-transparent h-10 border-b-0 p-0 gap-0">
-              <TabsTrigger
-                value="avalanche"
-                className="text-[11px] px-4 h-10 rounded-none border-b-2 border-transparent data-[state=active]:border-emerald-400 data-[state=active]:bg-transparent data-[state=active]:text-emerald-400 data-[state=active]:shadow-none text-zinc-500 hover:text-zinc-300 transition-colors"
-              >
-                <svg className="w-3.5 h-3.5 mr-1.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                </svg>
-                Avalanche Visualizer
-              </TabsTrigger>
-              <TabsTrigger
-                value="bitcoin"
-                className="text-[11px] px-4 h-10 rounded-none border-b-2 border-transparent data-[state=active]:border-orange-400 data-[state=active]:bg-transparent data-[state=active]:text-orange-400 data-[state=active]:shadow-none text-zinc-500 hover:text-zinc-300 transition-colors"
-              >
-                <svg className="w-3.5 h-3.5 mr-1.5" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M11.5 11.5V6.5H13V8h1.5V6.5H16V5h-3.5V2h-1v3H8v1.5h3.5v5H6V14.5h3.5V18H8v1.5h1.5V22h1v-2.5H14V18h-1.5v-3.5H16V13h-3.5v-1.5H14V10h-2.5z" />
-                </svg>
-                Bitcoin Pipeline
-              </TabsTrigger>
-              <TabsTrigger
-                value="cible"
-                className="text-[11px] px-4 h-10 rounded-none border-b-2 border-transparent data-[state=active]:border-orange-400 data-[state=active]:bg-transparent data-[state=active]:text-orange-400 data-[state=active]:shadow-none text-zinc-500 hover:text-zinc-300 transition-colors"
-              >
-                <svg className="w-3.5 h-3.5 mr-1.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="12" cy="12" r="10" />
-                  <circle cx="12" cy="12" r="6" />
-                  <circle cx="12" cy="12" r="2" />
-                </svg>
-                CIBLE
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        </div>
-      </div>
+      <div className="max-w-[1400px] mx-auto px-4 pb-8">
+        {/* Target Input */}
+        <Card className="bg-[#0c1220] border-[#1a2540] mb-4">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-[#00ff88] text-sm tracking-[3px]">CIBLE — Adresse / Pubkey / Hash</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-[10px] text-[#5a6580] tracking-wider uppercase mb-1">Public Key (66/130 hex)</label>
+                <Input value={pubkey} onChange={e => setPubkey(e.target.value)} placeholder="02... ou 03..." className="bg-[#060a12] border-[#1a2540] text-[#00ff88] font-mono text-xs" spellCheck={false} />
+              </div>
+              <div>
+                <label className="block text-[10px] text-[#5a6580] tracking-wider uppercase mb-1">Hash SHA-256 (64 hex)</label>
+                <Input value={hash} onChange={e => setHash(e.target.value)} placeholder="a1b2c3... 64 hex chars" className="bg-[#060a12] border-[#1a2540] text-[#00ff88] font-mono text-xs" spellCheck={false} />
+              </div>
+              <div>
+                <label className="block text-[10px] text-[#5a6580] tracking-wider uppercase mb-1">Adresse Bitcoin</label>
+                <Input value={address} onChange={e => setAddress(e.target.value)} placeholder="1... ou 3... ou bc1..." className="bg-[#060a12] border-[#1a2540] text-[#00ff88] font-mono text-xs" spellCheck={false} />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-[120px_1fr_200px] gap-3 items-end">
+              <div>
+                <label className="block text-[10px] text-[#5a6580] tracking-wider uppercase mb-1">Puzzle #</label>
+                <Input type="number" value={puzzleNum} onChange={e => setPuzzleNum(parseInt(e.target.value) || 135)} min={1} max={256} className="bg-[#060a12] border-[#1a2540] text-[#ffaa00] font-mono text-lg font-black text-center" />
+              </div>
+              <div className="bg-[#060a12] border border-[#1a2540] rounded px-3 py-2 text-[#5a6580] text-xs tracking-wider">
+                Range: [2<sup className="text-[#ffaa00] font-bold">{puzzleNum - 1}</sup>, 2<sup className="text-[#ffaa00] font-bold">{puzzleNum}</sup>) — 2<sup className="text-[#ffaa00] font-bold">{puzzleNum - 1}</sup> clés
+              </div>
+              <div>
+                <label className="block text-[10px] text-[#5a6580] tracking-wider uppercase mb-1">Stratégie</label>
+                <Select value={strategy} onValueChange={setStrategy}>
+                  <SelectTrigger className="bg-[#060a12] border-[#1a2540] text-[#00ff88] font-mono text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-[#0c1220] border-[#1a2540]">
+                    <SelectItem value="all">Toutes (Kangaroo + Inc + Fractal)</SelectItem>
+                    <SelectItem value="kangaroo">Pollard Kangaroo</SelectItem>
+                    <SelectItem value="incremental">Incremental</SelectItem>
+                    <SelectItem value="fractal-guided">Fractal-Guided</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="flex gap-2 flex-wrap items-center">
+              <Button onClick={handleAnalyze} disabled={!connected} className="bg-[#00ff88] text-black font-bold hover:bg-[#33ffaa] hover:shadow-[0_0_20px_rgba(0,255,136,0.3)]">
+                ANALYSER & INIT
+              </Button>
+              <Button onClick={handleStartInversion} disabled={!analysis || running || !connected} className="bg-[#00ccff] text-black font-bold hover:bg-[#33ddff]">
+                LANCER INVERSION
+              </Button>
+              <Button onClick={handleStop} disabled={!running} className="bg-[#ff4444] text-white font-bold hover:bg-[#ff6666]">
+                ARRÊTER
+              </Button>
+              <Button onClick={handleReset} variant="outline" className="border-[#1a2540] text-[#5a6580]">
+                RESET
+              </Button>
+              <Badge className={`ml-auto ${connected ? 'bg-green-900/50 text-green-400 border-green-700' : 'bg-red-900/50 text-red-400 border-red-700'}`}>
+                {connected ? 'BACKEND: CONNECTÉ' : 'BACKEND: DÉCONNECTÉ'}
+              </Badge>
+            </div>
+          </CardContent>
+        </Card>
 
-      {/* Main Content */}
-      <main className="flex-1 max-w-7xl mx-auto w-full px-3 sm:px-4 py-4 sm:py-6">
-        {activeTab === "avalanche" && (
-          <>
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6">
-              {/* Left Column: Bit Grid */}
-              <div className="lg:col-span-5 space-y-4">
-                <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
-                      State Word Grid — Round {currentRound}
-                    </h2>
-                    <div className="text-[9px] font-mono text-zinc-600">
-                      {flippedBitIndex !== null
-                        ? `Comparing: base vs bit ${flippedBitIndex} flipped`
-                        : "No bit flip selected"}
+        {/* Tabs */}
+        <nav className="flex gap-0.5 mb-4 border-b border-[#1a2540]">
+          {tabs.map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+              className={`px-5 py-2.5 font-bold text-[11px] tracking-[2px] uppercase border-b-2 transition-colors ${activeTab === tab.id ? 'text-[#00ff88] border-[#00ff88]' : 'text-[#5a6580] border-transparent hover:text-[#c8d0e0]'}`}>
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+
+        {/* Tab Content */}
+        {activeTab === 'analyser' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Pipeline */}
+            <Card className="lg:col-span-2 bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Pipeline Bitcoin — Dérivation</CardTitle></CardHeader>
+              <CardContent>
+                <div className="flex flex-wrap items-center gap-2">
+                  {[
+                    { label: 'Public Key', value: analysis?.pipeline?.pubkey, cls: 'text-[#00ff88]' },
+                    { label: 'SHA-256', value: analysis?.pipeline?.sha256, cls: 'text-[#00ccff]' },
+                    { label: 'Hash160', value: analysis?.pipeline?.hash160, cls: 'text-[#00ccff]' },
+                    { label: 'Adresse', value: analysis?.pipeline?.address, cls: 'text-[#ffaa00]' },
+                  ].map((step, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      {i > 0 && <span className="text-[#5a6580] text-[10px]">→</span>}
+                      <div className="bg-[#060a12] border border-[#1a2540] rounded-md p-2 min-w-[140px] text-center">
+                        <div className="text-[8px] text-[#5a6580] tracking-wider uppercase">{step.label}</div>
+                        <div className={`text-[10px] font-mono break-all ${step.cls}`}>{step.value ? (step.value.length > 24 ? step.value.slice(0,16) + '...' + step.value.slice(-8) : step.value) : '—'}</div>
+                      </div>
                     </div>
-                  </div>
-                  <BitGrid
-                    roundState={roundState}
-                    diffusion={currentDiffusion}
-                    flippedBitIndex={flippedBitIndex}
-                    influencedBits={influencedBits}
-                  />
+                  ))}
                 </div>
+                {analysis?.pipeline?.verified === true && <p className="text-green-400 text-xs mt-2 font-bold">✓ Adresse vérifiée</p>}
+                {analysis?.pipeline?.verified === false && <p className="text-red-400 text-xs mt-2 font-bold">✗ Adresse ne correspond PAS</p>}
+              </CardContent>
+            </Card>
 
-                {analysis?.baseTrace && currentRound >= 0 && (
-                  <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-4">
-                    <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-                      Round {currentRound} Detail
-                    </h2>
-                    <div className="grid grid-cols-4 gap-2 text-[9px] font-mono">
-                      <div className="text-zinc-500">T1</div>
-                      <div className="col-span-3 text-cyan-400 break-all">
-                        {(modifiedTrace?.rounds[currentRound]?.T1 >>> 0).toString(16).padStart(8, "0")}
-                      </div>
-                      <div className="text-zinc-500">T2</div>
-                      <div className="col-span-3 text-cyan-400 break-all">
-                        {(modifiedTrace?.rounds[currentRound]?.T2 >>> 0).toString(16).padStart(8, "0")}
-                      </div>
-                      <div className="text-zinc-500">W[{currentRound}]</div>
-                      <div className="col-span-3 text-emerald-400 break-all">
-                        {(analysis.baseTrace.messageSchedule[currentRound] >>> 0).toString(16).padStart(8, "0")}
-                      </div>
+            {/* Signature Fractale */}
+            <Card className="lg:col-span-2 bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Signature Fractale du Hash Cible</CardTitle></CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-3 md:grid-cols-6 gap-2 mb-3">
+                  {[
+                    { label: 'Dim. Fractale', value: analysis?.fractal?.dimension?.toFixed(4) },
+                    { label: 'Platitude Spect.', value: analysis?.fractal?.spectralFlatness?.toFixed(4) },
+                    { label: 'Auto-Similarité', value: analysis?.fractal?.selfSimilarity?.toFixed(4) },
+                    { label: 'Anomalies', value: analysis?.fractal?.topAnomalies?.length?.toString(), highlight: true },
+                    { label: 'Rounds Faibles', value: analysis?.fractal?.anomalyRounds?.join(', ') || 'aucun', highlight: true },
+                    { label: 'Biais Spectral', value: analysis?.fractal?.biasedWords?.length + ' mots' },
+                  ].map((item, i) => (
+                    <div key={i} className="bg-[#060a12] border border-[#1a2540] rounded p-2 text-center">
+                      <div className="text-[7px] text-[#5a6580] tracking-wider uppercase">{item.label}</div>
+                      <div className={`text-sm font-black ${item.highlight ? 'text-[#ffaa00]' : 'text-[#00ccff]'}`}>{item.value || '—'}</div>
                     </div>
-                    <div className="mt-3 grid grid-cols-8 gap-1">
-                      {WORD_NAMES.map((name, i) => {
-                        const word = modifiedTrace?.rounds[currentRound]
-                          ? [modifiedTrace.rounds[currentRound].a, modifiedTrace.rounds[currentRound].b, modifiedTrace.rounds[currentRound].c, modifiedTrace.rounds[currentRound].d, modifiedTrace.rounds[currentRound].e, modifiedTrace.rounds[currentRound].f, modifiedTrace.rounds[currentRound].g, modifiedTrace.rounds[currentRound].h][i]
-                          : 0;
-                        return (
-                          <div key={name} className="text-center">
-                            <div className="text-[8px] text-zinc-600">{name}</div>
-                            <div className="text-[7px] font-mono text-zinc-400">
-                              {(word >>> 0).toString(16).padStart(8, "0")}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
+                  ))}
+                </div>
+                <canvas ref={el => { canvasRefs.current['signatureRadar'] = el; }} width={400} height={250} className="w-full" />
+              </CardContent>
+            </Card>
+
+            {/* Range Info */}
+            <Card className="lg:col-span-2 bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Range de Recherche — Puzzle #{analysis?.range?.puzzleNum || puzzleNum}</CardTitle></CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <div className="bg-[#060a12] border border-[#1a2540] rounded p-2 text-center">
+                    <div className="text-[7px] text-[#5a6580] tracking-wider uppercase">Min (hex)</div>
+                    <div className="text-xs font-mono text-[#00ff88] break-all">{analysis?.range?.nMin || '—'}</div>
                   </div>
-                )}
-              </div>
-
-              {/* Right Column: Analysis Dashboard */}
-              <div className="lg:col-span-7">
-                <AnalysisDashboard
-                  diffusion={diffusion}
-                  currentRound={currentRound}
-                  onRoundClick={setCurrentRound}
-                  flipBitIndex={flippedBitIndex}
-                />
-              </div>
-            </div>
-
-            {/* Round Controls */}
-            <div className="mt-4 sm:mt-6 bg-zinc-900/60 border border-zinc-800 rounded-xl p-4">
-              <RoundControls
-                currentRound={currentRound}
-                totalRounds={64}
-                isPlaying={isPlaying}
-                speed={speed}
-                onRoundChange={setCurrentRound}
-                onPlayPause={handlePlayPause}
-                onStepForward={handleStepForward}
-                onStepBackward={handleStepBackward}
-                onSpeedChange={setSpeed}
-              />
-            </div>
-
-            {/* Input Panel */}
-            <div className="mt-4 sm:mt-6">
-              <InputPanel
-                inputBlock={inputBlock}
-                flippedBitIndex={flippedBitIndex}
-                onInputBlockChange={handleInputBlockChange}
-                onFlipBit={handleFlipBit}
-              />
-            </div>
-
-            {/* Hash comparison */}
-            {finalHash && modifiedHash && (
-              <div className="mt-4 sm:mt-6 bg-zinc-900/60 border border-zinc-800 rounded-xl p-4">
-                <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-                  Compression Output Comparison
-                </h2>
-                <div className="space-y-1 font-mono text-[9px]">
-                  <div className="flex items-start gap-2">
-                    <span className="text-zinc-600 w-12 shrink-0">Base:</span>
-                    <span className="text-emerald-400/70 break-all">{finalHash}</span>
+                  <div className="bg-[#060a12] border border-[#1a2540] rounded p-2 text-center">
+                    <div className="text-[7px] text-[#5a6580] tracking-wider uppercase">Max (hex)</div>
+                    <div className="text-xs font-mono text-[#00ff88] break-all">{analysis?.range?.nMax || '—'}</div>
                   </div>
-                  <div className="flex items-start gap-2">
-                    <span className="text-zinc-600 w-12 shrink-0">Mod:</span>
-                    <span className="text-orange-400/70 break-all">{modifiedHash}</span>
+                  <div className="bg-[#060a12] border border-[#1a2540] rounded p-2 text-center">
+                    <div className="text-[7px] text-[#5a6580] tracking-wider uppercase">Taille Range</div>
+                    <div className="text-sm font-black text-[#ffaa00]">{analysis?.range?.rangeSize || `2^${puzzleNum-1}`}</div>
                   </div>
-                  <div className="flex items-start gap-2">
-                    <span className="text-zinc-600 w-12 shrink-0">Diff:</span>
-                    <span className="break-all">
-                      {finalHash.split("").map((char, i) => (
-                        <span
-                          key={i}
-                          className={
-                            char !== modifiedHash[i]
-                              ? "text-red-400 font-bold"
-                              : "text-zinc-700"
-                          }
-                        >
-                          {modifiedHash[i]}
-                        </span>
-                      ))}
-                    </span>
+                  <div className="bg-[#060a12] border border-[#1a2540] rounded p-2 text-center">
+                    <div className="text-[7px] text-[#5a6580] tracking-wider uppercase">Avalanche Wall</div>
+                    <div className="text-sm font-black text-[#00ccff]">Round {analysis?.avalanche?.wall ?? '—'}</div>
                   </div>
                 </div>
-              </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {activeTab === 'fractal' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card className="bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Box-Counting sur {`{0,1}²⁵⁶`}</CardTitle></CardHeader>
+              <CardContent>
+                <canvas ref={el => { canvasRefs.current['boxCounting'] = el; }} width={600} height={300} className="w-full" />
+                <p className="text-[#5a6580] text-xs mt-2">Dimension estimée: <strong className="text-[#00ff88]">{analysis?.fractal?.dimension?.toFixed(4) || '—'}</strong></p>
+              </CardContent>
+            </Card>
+            <Card className="bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Spectre Walsh-Hadamard</CardTitle></CardHeader>
+              <CardContent>
+                <canvas ref={el => { canvasRefs.current['walsh'] = el; }} width={600} height={300} className="w-full" />
+                <div className="flex gap-4 text-xs text-[#5a6580] mt-2">
+                  <span>Platitude: <strong className="text-[#00ff88]">{analysis?.fractal?.spectralFlatness?.toFixed(4) || '—'}</strong></span>
+                  <span>Non-linéarité: <strong className="text-[#00ff88]">{analysis?.fractal?.walshHadamard?.nonlinearity?.toFixed(1) || '—'}</strong></span>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="lg:col-span-2 bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Auto-Similarité — Hamming</CardTitle></CardHeader>
+              <CardContent>
+                <canvas ref={el => { canvasRefs.current['selfSim'] = el; }} width={600} height={300} className="w-full" />
+                <p className="text-[#5a6580] text-xs mt-2">Score: <strong className="text-[#00ff88]">{analysis?.fractal?.selfSimilarity?.toFixed(4) || '—'}</strong></p>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {activeTab === 'resonance' && (
+          <div className="space-y-4">
+            <Card className="bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Scanner de Résonance — Anomalies (Round × Échelle)</CardTitle></CardHeader>
+              <CardContent>
+                <canvas ref={el => { canvasRefs.current['resonance'] = el; }} width={800} height={400} className="w-full" />
+                <div className="flex gap-4 text-xs text-[#5a6580] mt-2">
+                  <span>Anomalie max: <strong className="text-[#ff4444]">{analysis?.fractal?.maxAnomaly?.toFixed(3) || '—'}</strong></span>
+                  <span>Rounds faibles: <strong className="text-[#ffaa00]">{analysis?.fractal?.anomalyRounds?.join(', ') || 'aucun'}</strong></span>
+                  <span>Échelles faibles: <strong className="text-[#ffaa00]">{analysis?.fractal?.anomalyScales?.join(', ') || 'aucun'}</strong></span>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Top Anomalies Détectées</CardTitle></CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead><tr className="text-[#5a6580] tracking-wider uppercase border-b border-[#1a2540]"><th className="p-2 text-left">Round</th><th className="p-2 text-left">Échelle</th><th className="p-2 text-left">Score</th></tr></thead>
+                    <tbody>
+                      {analysis?.fractal?.topAnomalies?.length ? analysis.fractal.topAnomalies.map((a: any, i: number) => (
+                        <tr key={i} className="border-b border-[#0f1520]"><td className="p-2">{a.round}</td><td className="p-2">{a.scale}</td><td className={`p-2 font-bold ${a.score > 5 ? 'text-red-400' : a.score > 3 ? 'text-yellow-400' : ''}`}>{a.score.toFixed(3)}</td></tr>
+                      )) : <tr><td colSpan={3} className="p-2 text-[#5a6580]">En attente d'initialisation...</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {activeTab === 'inversion' && (
+          <div className="space-y-4">
+            {/* Found Key */}
+            {found && privateKey && (
+              <Card className="bg-gradient-to-br from-green-950 to-green-900 border-2 border-green-400 shadow-[0_0_30px_rgba(0,255,136,0.2)]">
+                <CardContent className="p-6 text-center">
+                  <h3 className="text-green-400 text-lg font-black tracking-[4px] mb-3">★★★ CLÉ PRIVÉE TROUVÉE ★★★</h3>
+                  <div className="bg-[#060a12] rounded-md p-3 text-xl font-black text-green-400 font-mono break-all mb-2">{privateKey}</div>
+                </CardContent>
+              </Card>
             )}
 
-            {/* Discrete Fractal Analysis Section */}
-            <div className="mt-6">
-              <Collapsible open={isFractalOpen} onOpenChange={setIsFractalOpen}>
-                <div className="flex items-center justify-between">
-                  <CollapsibleTrigger asChild>
-                    <button className="flex items-center gap-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider hover:text-zinc-200 transition-colors">
-                      <span className="text-emerald-400">◈</span>
-                      Discrete Fractal Analysis
-                      <span className="text-[8px] text-zinc-600 font-mono normal-case">
-                        — Hypercube Dimension • Walsh Spectrum • Self-Similarity
-                      </span>
-                      <svg
-                        className={`w-3 h-3 transition-transform ${isFractalOpen ? "rotate-180" : ""}`}
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                      >
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </button>
-                  </CollapsibleTrigger>
-                  <Button
-                    size="sm"
-                    onClick={handleRunFractalAnalysis}
-                    disabled={isFractalLoading}
-                    className="h-7 text-[10px] bg-emerald-600 hover:bg-emerald-500 text-white"
-                  >
-                    {isFractalLoading ? (
-                      <span className="flex items-center gap-1">
-                        <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                        Computing...
-                      </span>
-                    ) : (
-                      "Run Analysis"
-                    )}
-                  </Button>
-                </div>
-
-                {isFractalLoading && (
-                  <div className="mt-3 space-y-1">
-                    <Progress value={fractalProgress} className="h-1.5" />
-                    <div className="text-[9px] text-zinc-500 font-mono">
-                      {fractalProgress < 60
-                        ? `Collecting state vectors... ${Math.round((fractalProgress / 60) * 256)}/256 bit flips`
-                        : fractalProgress < 100
-                          ? `Analyzing fractal dimensions... Round ${Math.round(((fractalProgress - 60) / 40) * 64)}/64`
-                          : "Complete!"
-                      }
+            {/* Stats */}
+            <Card className="bg-[#0c1220] border-[#1a2540] border-[#00ff88] shadow-[0_0_15px_rgba(0,255,136,0.05)]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ff88] text-xs tracking-[3px]">MODULE D'INVERSION — Recherche Backend</CardTitle></CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-3 md:grid-cols-6 gap-2 mb-4">
+                  {[
+                    { label: 'Itérations', value: stats.iterations.toLocaleString() },
+                    { label: 'Kangaroo Steps', value: stats.kangarooSteps.toLocaleString() },
+                    { label: 'Incremental Steps', value: stats.incrementalSteps.toLocaleString() },
+                    { label: 'Temps', value: stats.elapsed ? stats.elapsed.toFixed(1) + 's' : '—' },
+                    { label: 'Clés/s', value: stats.keysPerSec },
+                    { label: 'Stratégie', value: strategy },
+                  ].map((item, i) => (
+                    <div key={i} className="bg-[#060a12] border border-[#1a2540] rounded p-2 text-center">
+                      <div className="text-[7px] text-[#5a6580] tracking-wider uppercase">{item.label}</div>
+                      <div className="text-base font-black text-[#00ff88]">{item.value}</div>
                     </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Log */}
+            <Card className="bg-[#0c1220] border-[#1a2540]">
+              <CardHeader className="pb-2"><CardTitle className="text-[#00ccff] text-xs tracking-[2px]">Journal d'Inversion</CardTitle></CardHeader>
+              <CardContent>
+                <ScrollArea className="h-64 w-full">
+                  <div ref={logRef} className="space-y-0.5">
+                    {logs.length === 0 ? (
+                      <p className="text-[#5a6580] text-xs">En attente de connexion backend...</p>
+                    ) : logs.map((log, i) => (
+                      <p key={i} className={`text-[10px] border-b border-[#0f1520] py-0.5 ${logColor(log.type)}`}>
+                        [{log.time}] {log.msg}
+                      </p>
+                    ))}
                   </div>
-                )}
-
-                <CollapsibleContent>
-                  <div className="mt-4">
-                    {fractalAnalysis ? (
-                      <DiscreteFractalPanel
-                        analysis={fractalAnalysis}
-                        currentRound={currentRound}
-                        onRoundChange={setCurrentRound}
-                      />
-                    ) : (
-                      <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-xl p-8 text-center">
-                        <div className="text-zinc-500 text-sm">
-                          Click "Run Analysis" to compute discrete fractal dimensions across all 64 rounds.
-                        </div>
-                        <div className="text-zinc-600 text-[10px] font-mono mt-2">
-                          This analyzes 257 compression traces (1 base + 256 bit flips) × 64 rounds = 16,448 state vectors
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </CollapsibleContent>
-              </Collapsible>
-            </div>
-          </>
+                </ScrollArea>
+              </CardContent>
+            </Card>
+          </div>
         )}
-
-        {activeTab === "bitcoin" && (
-          <BitcoinPipelinePanel />
-        )}
-
-        {activeTab === "cible" && (
-          <TargetInputPanel />
-        )}
-      </main>
-
-      {/* Footer */}
-      <footer className="border-t border-zinc-800/50 mt-auto">
-        <div className="max-w-7xl mx-auto px-4 py-3 text-center text-[9px] text-zinc-600 font-mono">
-          VORTEX PRIME — SHA-256 Discrete Fractal Analysis Suite •
-          Avalanche Visualizer • Bitcoin Pipeline • CIBLE • 64 rounds • 256 state bits
-        </div>
-      </footer>
+      </div>
     </div>
   );
 }
