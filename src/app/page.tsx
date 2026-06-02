@@ -5,10 +5,16 @@ import BitGrid from "@/components/bit-grid";
 import RoundControls from "@/components/round-controls";
 import AnalysisDashboard from "@/components/analysis-dashboard";
 import InputPanel from "@/components/input-panel";
+import DiscreteFractalPanel from "@/components/discrete-fractal-panel";
 import { computeFullAnalysis, findAvalanchePoint, WORD_NAMES } from "@/lib/diffusion-analyzer";
 import { verifySha256, hashToHex, sha256Full, getWordBit } from "@/lib/sha256-engine";
+import { computeFullDiscreteAnalysis } from "@/lib/discrete-fractal";
 import type { DiffusionData } from "@/lib/diffusion-analyzer";
 import type { CompressionTrace } from "@/lib/sha256-engine";
+import type { FullDiscreteAnalysis } from "@/lib/discrete-fractal";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
+import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 
 function generateRandomBlock(): Uint8Array {
   const block = new Uint8Array(64);
@@ -28,6 +34,12 @@ export default function Home() {
   const [currentRound, setCurrentRound] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
+
+  // Discrete Fractal Analysis state
+  const [fractalAnalysis, setFractalAnalysis] = useState<FullDiscreteAnalysis | null>(null);
+  const [isFractalLoading, setIsFractalLoading] = useState(false);
+  const [fractalProgress, setFractalProgress] = useState(0);
+  const [isFractalOpen, setIsFractalOpen] = useState(false);
 
   // Verification result - computed once via useMemo (no setState in effect)
   const verificationResult = useMemo(() => verifySha256(), []);
@@ -140,7 +152,25 @@ export default function Home() {
     setInputBlock(block);
     setCurrentRound(0);
     setIsPlaying(false);
+    // Reset fractal analysis when input changes
+    setFractalAnalysis(null);
   }, []);
+
+  const handleRunFractalAnalysis = useCallback(() => {
+    setIsFractalLoading(true);
+    setFractalProgress(0);
+    setIsFractalOpen(true);
+
+    // Use setTimeout to allow the UI to update before heavy computation
+    setTimeout(() => {
+      const result = computeFullDiscreteAnalysis(inputBlock, (pct) => {
+        setFractalProgress(pct);
+      });
+      setFractalAnalysis(result);
+      setIsFractalLoading(false);
+      setFractalProgress(100);
+    }, 50);
+  }, [inputBlock]);
 
   // Compute final hash for display
   const finalHash = useMemo(() => {
@@ -332,6 +362,85 @@ export default function Home() {
             </div>
           </div>
         )}
+
+        {/* Discrete Fractal Analysis Section */}
+        <div className="mt-6">
+          <Collapsible open={isFractalOpen} onOpenChange={setIsFractalOpen}>
+            <div className="flex items-center justify-between">
+              <CollapsibleTrigger asChild>
+                <button className="flex items-center gap-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider hover:text-zinc-200 transition-colors">
+                  <span className="text-emerald-400">◈</span>
+                  Discrete Fractal Analysis
+                  <span className="text-[8px] text-zinc-600 font-mono normal-case">
+                    — Hypercube Dimension • Walsh Spectrum • Self-Similarity
+                  </span>
+                  <svg
+                    className={`w-3 h-3 transition-transform ${isFractalOpen ? "rotate-180" : ""}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+              </CollapsibleTrigger>
+              <Button
+                size="sm"
+                onClick={handleRunFractalAnalysis}
+                disabled={isFractalLoading}
+                className="h-7 text-[10px] bg-emerald-600 hover:bg-emerald-500 text-white"
+              >
+                {isFractalLoading ? (
+                  <span className="flex items-center gap-1">
+                    <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Computing...
+                  </span>
+                ) : (
+                  "Run Analysis"
+                )}
+              </Button>
+            </div>
+
+            {isFractalLoading && (
+              <div className="mt-3 space-y-1">
+                <Progress value={fractalProgress} className="h-1.5" />
+                <div className="text-[9px] text-zinc-500 font-mono">
+                  {fractalProgress < 60
+                    ? `Collecting state vectors... ${Math.round((fractalProgress / 60) * 256)}/256 bit flips`
+                    : fractalProgress < 100
+                      ? `Analyzing fractal dimensions... Round ${Math.round(((fractalProgress - 60) / 40) * 64)}/64`
+                      : "Complete!"
+                  }
+                </div>
+              </div>
+            )}
+
+            <CollapsibleContent>
+              <div className="mt-4">
+                {fractalAnalysis ? (
+                  <DiscreteFractalPanel
+                    analysis={fractalAnalysis}
+                    currentRound={currentRound}
+                    onRoundChange={setCurrentRound}
+                  />
+                ) : (
+                  <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-xl p-8 text-center">
+                    <div className="text-zinc-500 text-sm">
+                      Click "Run Analysis" to compute discrete fractal dimensions across all 64 rounds.
+                    </div>
+                    <div className="text-zinc-600 text-[10px] font-mono mt-2">
+                      This analyzes 257 compression traces (1 base + 256 bit flips) × 64 rounds = 16,448 state vectors
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        </div>
       </main>
 
       {/* Footer */}
