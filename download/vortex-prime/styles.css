@@ -79,6 +79,13 @@ body {
   margin-bottom: 15px;
 }
 
+.input-row-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 15px;
+}
+
 .input-group label {
   display: block;
   font-size: 11px;
@@ -575,6 +582,7 @@ canvas {
 /* Responsive */
 @media (max-width: 900px) {
   .input-row, .analyser-grid, .fractal-grid { grid-template-columns: 1fr; }
+  .input-row-3 { grid-template-columns: 1fr; }
   .sig-grid, .inv-stats-grid { grid-template-columns: repeat(3, 1fr); }
   .pipeline-flow { flex-direction: column; align-items: flex-start; }
   .pipeline-arrow { display: none; }

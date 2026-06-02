@@ -18,14 +18,18 @@
 
   <!-- Target Input Panel -->
   <section class="target-panel">
-    <h2 class="section-title">CIBLE — Adresse & Pubkey</h2>
-    <div class="input-row">
+    <h2 class="section-title">CIBLE — Adresse / Pubkey / Hash</h2>
+    <div class="input-row-3">
       <div class="input-group">
-        <label>Public Key (compressée 66 hex / décompressée 130 hex)</label>
-        <input type="text" id="pubkeyInput" placeholder="02 ou 03 + 64 hex chars" class="hex-input" spellcheck="false">
+        <label>Public Key (compressée 66 / décompressée 130 hex)</label>
+        <input type="text" id="pubkeyInput" placeholder="02... ou 03... ou 04..." class="hex-input" spellcheck="false">
       </div>
       <div class="input-group">
-        <label>Adresse Bitcoin (optionnel — vérification croisée)</label>
+        <label>Hash SHA-256 (64 hex chars — cible directe)</label>
+        <input type="text" id="hashInput" placeholder="a1b2c3... 64 hex chars" class="hex-input" spellcheck="false">
+      </div>
+      <div class="input-group">
+        <label>Adresse Bitcoin (vérification croisée)</label>
         <input type="text" id="addressInput" placeholder="1... ou 3... ou bc1..." class="hex-input" spellcheck="false">
       </div>
     </div>
@@ -277,64 +281,106 @@ document.querySelectorAll('.tab').forEach(tab => {
 // ── ANALYSER & INIT INVERSION ──
 document.getElementById('btnAnalyze').addEventListener('click', async () => {
   const pubkeyHex = document.getElementById('pubkeyInput').value.trim().replace(/\s/g, '');
+  const hashHex = document.getElementById('hashInput').value.trim().replace(/\s/g, '');
   const address = document.getElementById('addressInput').value.trim();
 
-  if (!pubkeyHex || pubkeyHex.length < 66) {
-    showStatus('ERREUR: Pubkey requise (66 ou 130 hex chars)', 'error');
+  // Au moins un champ requis
+  if (!pubkeyHex && !hashHex && !address) {
+    showStatus('ERREUR: Entrez au moins une pubkey, un hash ou une adresse', 'error');
     return;
   }
 
-  showStatus('Analyse de la pubkey & initialisation de l\'inversion...', 'loading');
+  // Valider le hash si fourni
+  if (hashHex && !/^[0-9a-fA-F]{64}$/.test(hashHex)) {
+    showStatus('ERREUR: Hash invalide (64 hex chars requis)', 'error');
+    return;
+  }
+
+  // Valider la pubkey si fournie
+  if (pubkeyHex && pubkeyHex.length !== 66 && pubkeyHex.length !== 130) {
+    showStatus('ERREUR: Pubkey invalide (66 ou 130 hex chars)', 'error');
+    return;
+  }
+
+  showStatus('Analyse & initialisation de l\'inversion...', 'loading');
 
   setTimeout(async () => {
     try {
-      // ── 1. Pipeline Bitcoin ──
-      const pubkeyBytes = sha256Engine.hexToBytes(pubkeyHex);
-      const sha256Result = sha256Engine.hashWithStates(pubkeyBytes);
-      const sha256Hash = sha256Result.hashHex;
-
-      // RIPEMD-160(SHA-256(pubkey))
-      const hash160 = ripemd160Manual(sha256Result.hash);
-      const hash160Hex = Array.from(hash160).map(b => b.toString(16).padStart(2,'0')).join('');
-
-      // Compute address
+      let targetPubkey = pubkeyHex || null;
+      let targetHash = hashHex || null;
+      let sha256Result = null;
+      let hash160Hex = '';
       let computedAddress = '';
-      try {
-        computedAddress = await secp256k1.pubkeyToAddress(pubkeyHex);
-      } catch(e) {
-        // Fallback: manual address generation
-        const versioned = new Uint8Array(21);
-        versioned[0] = 0x00;
-        versioned.set(hash160, 1);
-        const cs1 = new Uint8Array(await crypto.subtle.digest('SHA-256', versioned));
-        const cs2 = new Uint8Array(await crypto.subtle.digest('SHA-256', cs1));
-        const addr = new Uint8Array(25);
-        addr.set(versioned);
-        addr.set(cs2.subarray(0, 4), 21);
-        computedAddress = base58Encode(addr);
-      }
 
-      // Display pipeline
-      document.getElementById('pipePubkey').textContent = pubkeyHex.length > 40 ? pubkeyHex.slice(0,20) + '...' + pubkeyHex.slice(-20) : pubkeyHex;
-      document.getElementById('pipeSha256').textContent = sha256Hash;
-      document.getElementById('pipeHash160').textContent = hash160Hex;
-      document.getElementById('pipeAddress').textContent = computedAddress;
+      // ── 1. Pipeline Bitcoin (si pubkey fournie) ──
+      if (targetPubkey) {
+        const pubkeyBytes = sha256Engine.hexToBytes(targetPubkey);
+        sha256Result = sha256Engine.hashWithStates(pubkeyBytes);
+        const sha256Hash = sha256Result.hashHex;
 
-      // Verify address match if provided
-      const verifyEl = document.getElementById('pipelineVerify');
-      if (address && computedAddress) {
-        if (address === computedAddress) {
-          verifyEl.innerHTML = '<span class="verify-ok">✓ Adresse vérifiée — correspond à la pubkey</span>';
+        // Si hash aussi fourni, vérifier la correspondance
+        if (targetHash) {
+          if (targetHash.toLowerCase() !== sha256Hash.toLowerCase()) {
+            const verifyEl = document.getElementById('pipelineVerify');
+            verifyEl.innerHTML = '<span class="verify-fail">✗ Hash fourni ne correspond PAS à SHA-256(pubkey)</span>';
+          }
         } else {
-          verifyEl.innerHTML = '<span class="verify-fail">✗ Adresse ne correspond PAS à la pubkey (attendue: ' + computedAddress.slice(0,12) + '...)</span>';
+          targetHash = sha256Hash;
         }
-      } else if (computedAddress) {
-        verifyEl.innerHTML = '<span class="verify-info">Adresse dérivée: ' + computedAddress + '</span>';
+
+        // RIPEMD-160
+        const hash160 = ripemd160Manual(sha256Result.hash);
+        hash160Hex = Array.from(hash160).map(b => b.toString(16).padStart(2,'0')).join('');
+
+        // Compute address
+        try {
+          computedAddress = await secp256k1.pubkeyToAddress(targetPubkey);
+        } catch(e) {
+          const versioned = new Uint8Array(21);
+          versioned[0] = 0x00;
+          versioned.set(hash160, 1);
+          const cs1 = new Uint8Array(await crypto.subtle.digest('SHA-256', versioned));
+          const cs2 = new Uint8Array(await crypto.subtle.digest('SHA-256', cs1));
+          const addr = new Uint8Array(25);
+          addr.set(versioned);
+          addr.set(cs2.subarray(0, 4), 21);
+          computedAddress = base58Encode(addr);
+        }
+
+        // Display pipeline
+        document.getElementById('pipePubkey').textContent = targetPubkey.length > 40 ? targetPubkey.slice(0,20) + '...' + targetPubkey.slice(-20) : targetPubkey;
+        document.getElementById('pipeSha256').textContent = sha256Hash;
+        document.getElementById('pipeHash160').textContent = hash160Hex;
+        document.getElementById('pipeAddress').textContent = computedAddress;
+
+        // Verify address match
+        const verifyEl = document.getElementById('pipelineVerify');
+        if (address && computedAddress) {
+          if (address === computedAddress) {
+            verifyEl.innerHTML = '<span class="verify-ok">✓ Adresse vérifiée — correspond à la pubkey</span>';
+          } else {
+            verifyEl.innerHTML = '<span class="verify-fail">✗ Adresse ne correspond PAS à la pubkey (attendue: ' + computedAddress.slice(0,12) + '...)</span>';
+          }
+        } else if (computedAddress) {
+          verifyEl.innerHTML = '<span class="verify-info">Adresse dérivée: ' + computedAddress + '</span>';
+        }
+      } else if (targetHash) {
+        // Pas de pubkey, juste un hash — pipeline partiel
+        document.getElementById('pipePubkey').textContent = '— non fournie —';
+        document.getElementById('pipeSha256').textContent = targetHash;
+        document.getElementById('pipeHash160').textContent = '—';
+        document.getElementById('pipeAddress').textContent = address || '—';
+        document.getElementById('pipelineVerify').innerHTML = '<span class="verify-info">Mode hash direct — inversion sans pubkey</span>';
       }
 
       // ── 2. Init Inversion Engine ──
       invEngine = new InversionEngine();
-      initResult = invEngine.initTarget(pubkeyHex);
+
+      if (targetPubkey) {
+        initResult = invEngine.initTarget(targetPubkey);
+      } else if (targetHash) {
+        initResult = invEngine.initTargetHash(targetHash);
+      }
       convergenceData = [];
 
       // Display target hash
@@ -354,24 +400,27 @@ document.getElementById('btnAnalyze').addEventListener('click', async () => {
       document.getElementById('sigSelfSim').textContent = fr.selfSimilarity.similarity.toFixed(4);
       document.getElementById('sigAnomalies').textContent = initResult.anomalyMap.topAnomalies.length.toString();
       document.getElementById('sigWeakRounds').textContent = initResult.anomalyMap.weakRounds.join(', ') || 'aucun';
-      document.getElementById('sigSpectralBias').textContent = initResult.fractalResult.walshHadamard.spectra.filter(s => s.flatness > 2).length + ' mots';
+      document.getElementById('sigSpectralBias').textContent = fr.walshHadamard.spectra.filter(s => s.flatness > 2).length + ' mots';
 
-      // Draw signature radar
       drawSignatureRadar(fr, initResult.anomalyMap);
-
-      // Update fractal displays
       updateFractalDisplays(fr);
       updateResonanceDisplays(fr.resonance, initResult.anomalyMap);
 
-      // Update avalanche for target
-      updateAvalancheDisplay(pubkeyHex);
+      // Avalanche (seulement si pubkey fournie)
+      if (targetPubkey) {
+        updateAvalancheDisplay(targetPubkey);
+      }
 
       showStatus(`Analyse complète — ${initResult.anomalyMap.topAnomalies.length} anomalies — Inversion prête`, 'success');
 
-      addLog('info', `Pubkey: ${pubkeyHex.slice(0,20)}... → SHA-256: ${sha256Hash.slice(0,32)}...`);
-      addLog('info', `Hash160: ${hash160Hex} — Adresse: ${computedAddress}`);
-      addLog('info', `Anomalies résonance: ${initResult.anomalyMap.topAnomalies.length} — Rounds faibles: ${initResult.anomalyMap.weakRounds.join(', ') || 'aucun'}`);
-      addLog('info', `Inversion initialisée — Hash cible: ${initResult.targetHash.slice(0,32)}...`);
+      if (targetPubkey) {
+        addLog('info', `Pubkey: ${targetPubkey.slice(0,20)}... → SHA-256: ${initResult.targetHash.slice(0,32)}...`);
+        if (hash160Hex) addLog('info', `Hash160: ${hash160Hex} — Adresse: ${computedAddress}`);
+      } else {
+        addLog('info', `Hash cible direct: ${targetHash.slice(0,32)}...`);
+      }
+      addLog('info', `Anomalies: ${initResult.anomalyMap.topAnomalies.length} — Rounds faibles: ${initResult.anomalyMap.weakRounds.join(', ') || 'aucun'}`);
+      addLog('info', `Inversion initialisée`);
 
     } catch (e) {
       showStatus('ERREUR: ' + e.message, 'error');
@@ -425,6 +474,7 @@ document.getElementById('btnStop').addEventListener('click', () => {
 document.getElementById('btnReset').addEventListener('click', () => {
   invEngine = null; initResult = null; convergenceData = [];
   document.getElementById('pubkeyInput').value = '';
+  document.getElementById('hashInput').value = '';
   document.getElementById('addressInput').value = '';
   document.getElementById('pipePubkey').textContent = '—';
   document.getElementById('pipeSha256').textContent = '—';

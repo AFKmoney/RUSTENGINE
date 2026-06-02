@@ -59,6 +59,39 @@ class InversionEngine {
     };
   }
 
+  // ── Step 1a: Initialize with raw hash (no pubkey) ──
+  // When the user provides a hash directly instead of a pubkey
+  initTargetHash(hashHex) {
+    this.targetHash = hashHex.toLowerCase();
+
+    // We still need round states for fractal analysis
+    // Reconstruct by hashing the hash bytes themselves
+    const hashBytes = this.sha256.hexToBytes(this.targetHash);
+    const result = this.sha256.hashWithStates(hashBytes);
+    this.targetStates = result.roundStates;
+
+    // Run fractal analysis on the reconstructed trajectory
+    this.fractalResult = runFullFractalAnalysis(this.targetStates);
+
+    // Build anomaly map from resonance scanner
+    this.anomalyMap = this._buildAnomalyMap();
+
+    this.inversionLog = [];
+    this.candidates = [];
+    this.iteration = 0;
+    this.bestHamming = 256;
+    this.bestCandidate = null;
+
+    return {
+      targetHash: this.targetHash,
+      fractalResult: this.fractalResult,
+      anomalyMap: this.anomalyMap,
+      resonanceAnomalies: this.fractalResult.resonance.anomalyRounds,
+      spectralBias: this._extractSpectralBias(),
+      selfSimScore: this.fractalResult.selfSimilarity.similarity
+    };
+  }
+
   // ── Build anomaly map from resonance scanner ──
   // Returns: { weakRounds: [round indices], weakScales: [scale values],
   //            anomalyMatrix: 2D array, topAnomalies: [{round, scale, score}] }
