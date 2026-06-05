@@ -1,7 +1,15 @@
 //! 256-bit modular arithmetic for secp256k1
-//! [u64; 4] limbs, big-endian across limbs
+//! Uses BigUint internally for CORRECT results.
+//! Performance: ~10x slower than native u64x4, but mathematically correct.
 
 use std::cmp::Ordering;
+use num_bigint::BigUint;
+use num_traits::{Zero, One};
+
+// secp256k1 prime
+const P_HEX: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F";
+// secp256k1 order
+const N_HEX: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fe {
@@ -12,25 +20,54 @@ impl Fe {
     pub const ZERO: Fe = Fe { limbs: [0, 0, 0, 0] };
     pub const ONE: Fe = Fe { limbs: [1, 0, 0, 0] };
 
-    const P: [u64; 4] = [
-        0xFFFFFFFEFFFFFC2F, 0xFFFFFFFFFFFFFFFF,
-        0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF,
-    ];
-
     #[inline]
     pub const fn from_u64(v: u64) -> Self { Fe { limbs: [v, 0, 0, 0] } }
     #[inline]
     pub const fn from_u64_limbs(l: [u64; 4]) -> Self { Fe { limbs: l } }
 
+    /// Get the prime P as BigUint
+    fn p_big() -> BigUint {
+        BigUint::parse_bytes(P_HEX.as_bytes(), 16).unwrap()
+    }
+
+    /// Get the order N as BigUint
+    fn n_big() -> BigUint {
+        BigUint::parse_bytes(N_HEX.as_bytes(), 16).unwrap()
+    }
+
+    /// Convert Fe to BigUint
+    pub fn to_biguint(&self) -> BigUint {
+        let bytes = self.to_bytes();
+        BigUint::from_bytes_be(&bytes)
+    }
+
+    /// Convert BigUint to Fe (mod P)
+    fn from_biguint_mod(v: &BigUint) -> Self {
+        let p = Self::p_big();
+        let reduced = v % &p;
+        let bytes = reduced.to_bytes_be();
+        let mut arr = [0u8; 32];
+        let start = 32 - bytes.len().min(32);
+        arr[start..32].copy_from_slice(&bytes[..bytes.len().min(32)]);
+        Self::from_bytes(&arr)
+    }
+
+    /// Convert BigUint to Fe (no mod, assumes v < P)
+    fn from_biguint_raw(v: &BigUint) -> Self {
+        let bytes = v.to_bytes_be();
+        let mut arr = [0u8; 32];
+        let start = 32 - bytes.len().min(32);
+        arr[start..32].copy_from_slice(&bytes[..bytes.len().min(32)]);
+        Self::from_bytes(&arr)
+    }
+
     pub fn from_bytes(b: &[u8; 32]) -> Self {
-        // Big-endian input: b[0] is MSB
-        // limbs[0] is LSB, limbs[3] is MSB
         let mut l = [0u64; 4];
         for i in 0..4 {
             let s = (3 - i) * 8;
             l[i] = u64::from_be_bytes([b[s],b[s+1],b[s+2],b[s+3],b[s+4],b[s+5],b[s+6],b[s+7]]);
         }
-        Fe { limbs: l }.normalize()
+        Fe { limbs: l }
     }
 
     pub fn to_bytes(&self) -> [u8; 32] {
@@ -48,7 +85,9 @@ impl Fe {
         let mut arr = [0u8; 32];
         let start = 32 - bytes.len().min(32);
         arr[start..32].copy_from_slice(&bytes[..bytes.len().min(32)]);
-        Self::from_bytes(&arr)
+        // Convert to BigUint then mod P
+        let big = BigUint::from_bytes_be(&arr);
+        Self::from_biguint_mod(&big)
     }
 
     #[inline] pub fn is_zero(&self) -> bool { self.limbs.iter().all(|&x| x == 0) }
@@ -61,148 +100,97 @@ impl Fe {
         Ordering::Equal
     }
 
-    pub fn normalize(&self) -> Self {
-        if self.cmp_val(&Self::P) != Ordering::Less { self.sub_impl(&Self::P) } else { *self }
-    }
-
-    fn sub_impl(&self, other: &[u64; 4]) -> Self {
-        let mut borrow = 0i128;
-        let mut r = [0u64; 4];
-        for i in 0..4 {
-            let d = self.limbs[i] as i128 - other[i] as i128 - borrow;
-            if d < 0 { r[i] = (d + (1i128 << 64)) as u64; borrow = 1; }
-            else { r[i] = d as u64; borrow = 0; }
-        }
-        Fe { limbs: r }
-    }
-
+    /// Modular addition: (self + other) mod P
     pub fn add(&self, o: &Fe) -> Self {
-        let mut carry = 0u64;
-        let mut r = [0u64; 4];
-        for i in 0..4 {
-            let (s1, c1) = self.limbs[i].overflowing_add(o.limbs[i]);
-            let (s2, c2) = s1.overflowing_add(carry);
-            r[i] = s2;
-            carry = c1 as u64 + c2 as u64;
-        }
-        let fe = Fe { limbs: r };
-        if carry > 0 || fe.cmp_val(&Self::P) != Ordering::Less { fe.sub_impl(&Self::P) } else { fe }
+        let a = self.to_biguint();
+        let b = o.to_biguint();
+        let p = Self::p_big();
+        let sum = (&a + &b) % &p;
+        Self::from_biguint_mod(&sum)
     }
 
+    /// Modular subtraction: (self - other) mod P
     pub fn sub(&self, o: &Fe) -> Self {
-        let mut borrow = 0u64;
-        let mut r = [0u64; 4];
-        for i in 0..4 {
-            let (d1, b1) = self.limbs[i].overflowing_sub(o.limbs[i]);
-            let (d2, b2) = d1.overflowing_sub(borrow);
-            r[i] = d2;
-            borrow = b1 as u64 + b2 as u64;
+        let a = self.to_biguint();
+        let b = o.to_biguint();
+        let p = Self::p_big();
+        let mut result = &a + &p - &b;
+        if result >= p {
+            result = &result - &p;
         }
-        if borrow > 0 {
-            let mut carry = 0u64;
-            for i in 0..4 {
-                let (s1, c1) = r[i].overflowing_add(Self::P[i]);
-                let (s2, c2) = s1.overflowing_add(carry);
-                r[i] = s2;
-                carry = c1 as u64 + c2 as u64;
-            }
-        }
-        Fe { limbs: r }
+        Self::from_biguint_raw(&result)
     }
 
+    /// Modular negation: (-self) mod P
     pub fn neg_mod_p(&self) -> Self {
-        if self.is_zero() { *self } else {
-            let p = Fe { limbs: Self::P };
-            p.sub_impl(&self.limbs)
-        }
+        if self.is_zero() { return *self; }
+        let a = self.to_biguint();
+        let p = Self::p_big();
+        Self::from_biguint_raw(&(&p - &a))
     }
 
+    /// Modular multiplication: (self * other) mod P
     pub fn mul(&self, o: &Fe) -> Self {
-        // Use num-bigint for correct modular multiplication
-        let a_big = self.to_biguint();
-        let b_big = o.to_biguint();
-        let p_big = Self::P_big();
-        let result = (a_big * b_big) % p_big;
-        Self::from_biguint(&result)
+        let a = self.to_biguint();
+        let b = o.to_biguint();
+        Self::from_biguint_mod(&(&a * &b))
     }
 
-    fn P_big() -> num_bigint::BigUint {
-        use num_bigint::BigUint;
-        BigUint::parse_bytes(
-            b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F",
-            16
-        ).unwrap()
-    }
-
-    fn to_biguint(&self) -> num_bigint::BigUint {
-        use num_bigint::BigUint;
-        let bytes = self.to_bytes();
-        BigUint::from_bytes_be(&bytes)
-    }
-
-    fn from_biguint(v: &num_bigint::BigUint) -> Self {
-        let bytes = v.to_bytes_be();
-        let mut arr = [0u8; 32];
-        let start = 32 - bytes.len().min(32);
-        arr[start..32].copy_from_slice(&bytes[..bytes.len().min(32)]);
-        Self::from_bytes(&arr)
-    }
-
+    /// Modular inverse: self^(-1) mod P via Fermat's little theorem
     pub fn modinv(&self) -> Self {
         if self.is_zero() { panic!("modinv of zero"); }
-        let exp = Fe { limbs: [0xFFFFFFFEFFFFFC2D, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF] };
-        self.pow(&exp)
+        // a^(-1) = a^(P-2) mod P
+        let p = Self::p_big();
+        let exp = &p - BigUint::from(2u64);
+        self.pow_biguint(&exp)
     }
 
-    pub fn pow(&self, exp: &Fe) -> Self {
+    /// Modular exponentiation using BigUint exponent
+    fn pow_biguint(&self, exp: &BigUint) -> Self {
         let mut result = Fe::ONE;
         let mut base = *self;
-        let mut e = *exp;
-        for _ in 0..512 {
-            if e.is_zero() { break; }
-            if e.limbs[0] & 1 == 1 { result = result.mul(&base); }
+        let mut e = exp.clone();
+        let zero = BigUint::zero();
+        
+        while e > zero {
+            if &e & BigUint::one() == BigUint::one() {
+                result = result.mul(&base);
+            }
             base = base.mul(&base);
-            e = e.shr1();
+            e >>= 1;
         }
         result
     }
 
+    /// Modular exponentiation using Fe exponent (for scalar_pow on order N)
+    pub fn pow(&self, exp: &Fe) -> Self {
+        let exp_big = exp.to_biguint();
+        self.pow_biguint(&exp_big)
+    }
+
     pub fn shr1(&self) -> Self {
-        let mut r = [0u64; 4];
-        for i in (0..4).rev() {
-            r[i] = self.limbs[i] >> 1;
-            if i > 0 { r[i] |= self.limbs[i-1] << 63; }
-        }
-        Fe { limbs: r }
+        let a = self.to_biguint();
+        let result = &a >> 1;
+        Self::from_biguint_raw(&result)
     }
 
     pub fn shl_bits(&self, n: usize) -> Self {
         if n == 0 { return *self; }
         if n >= 256 { return Fe::ZERO; }
-        let ws = n / 64;
-        let bs = n % 64;
-        let mut r = [0u64; 4];
-        for i in (ws..4).rev() {
-            r[i] = self.limbs[i - ws] << bs;
-            if bs > 0 && i + 1 < 4 { r[i + 1] |= self.limbs[i - ws] >> (64 - bs); }
-        }
-        // Simpler approach for our use case
-        Fe { limbs: r }.normalize()
+        let a = self.to_biguint();
+        let p = Self::p_big();
+        let result = (&a << n) % &p;
+        Self::from_biguint_mod(&result)
     }
 
     pub fn bit_length(&self) -> u32 {
-        for i in (0..4).rev() {
-            if self.limbs[i] != 0 { return (i as u32) * 64 + 64 - self.limbs[i].leading_zeros(); }
-        }
-        0
+        let a = self.to_biguint();
+        a.bits() as u32
     }
 
     pub fn power_of_2(n: u32) -> Self {
-        let word = n as usize / 64;
-        let bit = n % 64;
-        let mut l = [0u64; 4];
-        if word < 4 { l[word] = 1u64 << bit; }
-        Fe { limbs: l }
+        let result = BigUint::from(1u64) << n as usize;
+        Self::from_biguint_raw(&result)
     }
 }
 

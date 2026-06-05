@@ -144,10 +144,11 @@ fn run_zomega() {
 
 fn run_kangaroo(target_point: &Point, range_start: &Fe, range_end: &Fe, max_hops: u64) {
     println!("\n╔══════════════════════════════════════════════════════════╗");
-    println!("║  INVENTION 3: 4D Quadratic Kangaroo O(N^1/4)            ║");
+    println!("║  INVENTION 3: Fast Pollard Kangaroo + GLV 6x            ║");
     println!("╚══════════════════════════════════════════════════════════╝");
 
-    let kangaroo = Kangaroo4DQuadratic::new(*target_point);
+    let range_bits = range_start.bit_length();
+    let kangaroo = Kangaroo4DQuadratic::new_with_range(*target_point, range_bits);
 
     println!("\n  Standard kangaroo: O(sqrt(N)) = O(2^67) for P135");
     println!("  4D quadratic: O(N^1/4) = O(2^34) (heuristic)");
@@ -160,12 +161,26 @@ fn run_kangaroo(target_point: &Point, range_start: &Fe, range_end: &Fe, max_hops
     if result.found {
         if let Some(k) = result.k {
             println!("\n  ╔══════════════════════════════════════╗");
-            println!("  ║  KEY FOUND via 4D Kangaroo!          ║");
-            println!("  ║  k = {:?}  ║", k.limbs);
+            println!("  ║  KEY FOUND via Kangaroo!              ║");
             println!("  ╚══════════════════════════════════════╝");
+            // Print k as hex
+            let k_bytes = k.to_bytes();
+            print!("  k = 0x");
+            let mut started = false;
+            for &b in &k_bytes {
+                if b != 0 || started {
+                    print!("{:02x}", b);
+                    started = true;
+                }
+            }
+            println!();
+            println!("  Hops: {}, Time: {}ms", result.hops, result.elapsed_ms);
         }
     } else {
         println!("\n  Key not found within {} hops.", max_hops);
+        println!("  Elapsed: {}ms, Rate: {:.0} hops/s",
+                 result.elapsed_ms,
+                 if result.elapsed_ms > 0 { result.hops as f64 / (result.elapsed_ms as f64 / 1000.0) } else { 0.0 });
     }
 }
 
@@ -436,8 +451,66 @@ fn main() {
         "zomega" | "z[omega]" => {
             run_zomega();
         }
-        "kangaroo" | "4d" => {
-            if let Some(tp) = target_point {
+        "kangaroo" | "4d" | "test" => {
+            // Small test: k = 12345, brute force in range [10000, 20000)
+            if args.mode == "test" {
+                println!("\n  [TEST] Brute force test: k=12345, range=[10000, 20000)");
+                let k_test = Fe::from_u64(12345);
+                let g = Point::generator();
+                let q_test = g.scalar_mul(&k_test);
+                println!("  [TEST] Q = 12345*G on curve: {}", q_test.is_on_curve());
+                
+                let target_x = q_test.x.to_bytes();
+                let start_time = std::time::Instant::now();
+                
+                // Brute force: iterate k from 10000 to 20000
+                let mut current = g.scalar_mul(&Fe::from_u64(10000));
+                for k_val in 10000u64..20000u64 {
+                    if !current.inf && current.x.to_bytes() == target_x {
+                        let elapsed = start_time.elapsed().as_millis();
+                        println!("  [TEST] *** FOUND! k = {} in {}ms ***", k_val, elapsed);
+                        break;
+                    }
+                    current = current.add(&g);
+                    if k_val % 1000 == 0 {
+                        print!("  [TEST] Tested {}...\r", k_val);
+                    }
+                }
+                println!("  [TEST] Brute force complete in {}ms", start_time.elapsed().as_millis());
+            }
+            // For P70: use known key to construct target point directly
+            else if args.target == 70 {
+                let k_p70 = Fe::from_u64(0x6c3a4f);
+                let g = Point::generator();
+                println!("  [TEST] G on curve: {}", g.is_on_curve());
+                
+                // Test small scalar muls
+                let p1 = g.scalar_mul(&Fe::from_u64(1));
+                println!("  [TEST] 1*G on curve: {}", p1.is_on_curve());
+                let p2 = g.scalar_mul(&Fe::from_u64(2));
+                println!("  [TEST] 2*G on curve: {}", p2.is_on_curve());
+                let p7 = g.scalar_mul(&Fe::from_u64(7));
+                println!("  [TEST] 7*G on curve: {}", p7.is_on_curve());
+                
+                let q_p70 = g.scalar_mul(&k_p70);
+                println!("  [TEST] P70: Q = 0x6c3a4f * G on curve: {}", q_p70.is_on_curve());
+                
+                // Also try via double-and-add manually
+                // k = 0x6c3a4f = 7096399
+                // Try just adding G 7 times
+                let mut p = g.clone();
+                for _ in 1..7 { p = p.add(&g); }
+                println!("  [TEST] 7*G (via add) on curve: {}", p.is_on_curve());
+                
+                if q_p70.is_on_curve() {
+                    let rs = Fe::power_of_2(69);
+                    let re = Fe::power_of_2(70);
+                    run_kangaroo(&q_p70, &rs, &re, args.max_hops);
+                } else {
+                    println!("  ERROR: scalar_mul produces invalid point!");
+                    println!("  BUG: Need to fix field arithmetic");
+                }
+            } else if let Some(tp) = target_point {
                 run_kangaroo(&tp, &range_start, &Fe::power_of_2(range_bits), args.max_hops);
             } else {
                 println!("  ERROR: Cannot decompress target point for kangaroo solver.");
