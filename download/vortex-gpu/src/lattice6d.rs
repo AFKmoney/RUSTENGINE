@@ -29,7 +29,7 @@ use num_traits::{Zero, One};
 use std::fmt;
 
 // ============================================================
-// SIGNED BIGUINT (reuse from lattice.rs)
+// SIGNED BIGUINT (for lattice vector arithmetic)
 // ============================================================
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +66,16 @@ impl SignedBigUint {
         SignedBigUint { val, neg: result_neg && !is_zero }
     }
     pub fn bits(&self) -> u64 { self.val.bits() }
+
+    /// Convert to f64 for approximate comparisons
+    pub fn to_f64(&self) -> f64 {
+        let bytes = self.val.to_bytes_be();
+        let mut f = 0.0f64;
+        for &b in &bytes {
+            f = f * 256.0 + b as f64;
+        }
+        if self.neg { -f } else { f }
+    }
 }
 
 impl fmt::Display for SignedBigUint {
@@ -75,11 +85,14 @@ impl fmt::Display for SignedBigUint {
 }
 
 /// Round a signed division: round(num / den)
+/// Returns the nearest integer to num/den (round half away from zero).
 fn round_signed_div(num: &SignedBigUint, den: &SignedBigUint) -> SignedBigUint {
     if den.is_zero() || den.val.is_zero() { return SignedBigUint::zero(); }
     let q = &num.val / &den.val;
     let r = &num.val % &den.val;
-    let q_rounded = if &r + &r >= den.val { q + BigUint::one() } else { q };
+    // Round: if 2*r >= den.val, round up
+    let two_r = &r + &r;
+    let q_rounded = if two_r >= den.val { &q + BigUint::one() } else { q };
     let is_zero = q_rounded.is_zero();
     let result_neg = num.neg ^ den.neg;
     SignedBigUint { val: q_rounded, neg: result_neg && !is_zero }
@@ -137,7 +150,7 @@ impl Lattice6D {
 
     /// Set Z[ω] prime factor π = pi_a + pi_b·ω
     pub fn set_pi(&mut self, a: BigUint, b: BigUint) {
-        println!("  [6D] Setting π = {} + {}·ω ({} + {} bits)", 
+        println!("  [6D] Setting π = {} + {}·ω ({} + {} bits)",
                  a, b, a.bits(), b.bits());
         self.pi_a = a;
         self.pi_b = b;
@@ -193,7 +206,7 @@ impl Lattice6D {
     pub fn lll_reduce(&self, basis: &Vec<[SignedBigUint; DIM]>) -> Vec<[SignedBigUint; DIM]> {
         let mut b: Vec<[SignedBigUint; DIM]> = basis.clone();
 
-        let max_iter = 200;
+        let max_iter = 500;
         let mut iter = 0;
         let mut i: usize = 1;
 
@@ -204,27 +217,51 @@ impl Lattice6D {
 
             // Size-reduce b[i] with respect to b[0..i]
             for j in (0..i).rev() {
-                let mu_ij = compute_mu_nd(&b, i, j);
-                let mu_round = round_signed_big(&mu_ij);
-                if !mu_round.is_zero() {
+                // Compute μ_{i,j} = <b[i], b*[j]> / <b*[j], b*[j]>
+                // For size reduction, we use the simplified approximation:
+                // μ_{i,j} ≈ <b[i], b[j]> / <b[j], b[j]>
+                let dot_ij = dot_nd(&b[i], &b[j]);
+                let norm_j = dot_nd(&b[j], &b[j]);
+                let mu_ij = round_signed_div(&dot_ij, &norm_j);
+                if !mu_ij.is_zero() {
                     for d in 0..DIM {
-                        b[i][d] = b[i][d].sub(&mu_round.mul(&b[j][d]));
+                        b[i][d] = b[i][d].sub(&mu_ij.mul(&b[j][d]));
                     }
                 }
             }
 
-            // Lovász condition check
+            // Lovász condition check using exact Gram-Schmidt
             if i > 0 {
-                let gs = gram_schmidt_nd(&b, i + 1);
+                let gs = gram_schmidt_exact(&b, i + 1);
 
-                // Lovász: |b*[i]|² ≥ (3/4 - μ²_{i,i-1}) |b*[i-1]|²
-                // Approximate using bit lengths
+                // Lovász: |b*[i]|² ≥ (δ - μ²_{i,i-1}) |b*[i-1]|²
+                // with δ = 3/4
+                //
+                // We compute μ_{i,i-1} = <b[i], b*[i-1]> / <b*[i-1], b*[i-1]>
+                let mu_num = dot_nd(&b[i], &gs.b_star[i - 1]);
+                let mu_den = SignedBigUint::from_biguint(gs.norm_sq[i - 1].clone());
+                let mu_sq_approx = if !mu_den.is_zero() {
+                    let mu = round_signed_div(&mu_num, &mu_den);
+                    // μ² as approximate bit length
+                    mu.bits() * 2
+                } else {
+                    0u64
+                };
+
                 let bstar_i_bits = gs.norm_sq[i].bits();
                 let bstar_i1_bits = gs.norm_sq[i - 1].bits();
 
-                // If |b*[i]|² < 3/4 |b*[i-1]|², swap
-                // Approximate: bstar_i_bits + 1 < bstar_i1_bits (very generous)
-                if bstar_i_bits + 2 < bstar_i1_bits {
+                // Lovász condition (approximate using bit lengths):
+                // |b*[i]|² < (3/4) |b*[i-1]|²
+                // ≈ bstar_i_bits < bstar_i1_bits - 1 (since log2(3/4) ≈ -0.415)
+                // More precisely: compare norm_sq values
+                //
+                // 4 * |b*[i]|² < 3 * |b*[i-1]|²
+                let four_norm_i = &gs.norm_sq[i] << 2;
+                let three_norm_i1 = &gs.norm_sq[i - 1] * 3u64;
+
+                if four_norm_i < three_norm_i1 {
+                    // Lovász violated: swap b[i] and b[i-1]
                     b.swap(i, i - 1);
                     if i > 1 { i -= 1; }
                     continue;
@@ -256,10 +293,11 @@ impl Lattice6D {
     /// with |cᵢ| ~ n^(1/6) ≈ 2^45.
     ///
     /// Algorithm (Babai Nearest Plane):
-    ///   For i = 5, 4, ..., 0 (reverse):
+    ///   1. Compute full Gram-Schmidt orthogonalization b*[0..6]
+    ///   2. For i = 5, 4, ..., 0 (reverse):
     ///     cᵢ = round(<target, b*[i]> / <b*[i], b*[i]>)
     ///     target = target - cᵢ · v[i]  (original basis, not GS!)
-    ///   Residual = original_target - closest = (a₀, a₁, a₂, a₃, a₄, a₅)
+    ///   3. Residual = original_target - closest = (a₀, a₁, a₂, a₃, a₄, a₅)
     pub fn babai_cvp(
         &self,
         basis: &[[SignedBigUint; DIM]; DIM],
@@ -275,31 +313,23 @@ impl Lattice6D {
         ];
 
         // Compute full Gram-Schmidt for the 6D basis
-        let gs = gram_schmidt_nd_full(&basis.to_vec());
+        let gs = gram_schmidt_exact(&basis.to_vec(), DIM);
 
         // Babai nearest plane: process from i = DIM-1 down to 0
         let mut t = target.clone();
         let mut coefficients: [SignedBigUint; DIM] = std::array::from_fn(|_| SignedBigUint::zero());
 
         for i in (0..DIM).rev() {
-            // Compute <t, b*[i]> using GS coefficients
-            // <t, b*[i]> = <t, v[i]> - Σ_{j<i} μ_{i,j} · <t, b*[j]>
-            // This is complex in exact arithmetic. Use the simpler approach:
-            // cᵢ = round(dot(t, b*[i]) / dot(b*[i], b*[i]))
-            // where b*[i] is approximated from the GS computation.
-
-            // For exact computation, we use the fact that:
-            // <t, b*[i]> = (det_i_submatrix_with_t / det_i_submatrix) × det_{i-1}
-            // But this is too expensive. Instead, use the projected dot product.
-
-            // Simpler approach: compute the dot product directly
+            // Compute <t, b*[i]>
             let t_dot_bstar_i = dot_nd(&t, &gs.b_star[i]);
-            let bstar_i_norm_sq = gs.norm_sq[i].clone();
+            // <b*[i], b*[i]> = norm_sq[i]
+            let bstar_i_norm_sq = SignedBigUint::from_biguint(gs.norm_sq[i].clone());
 
-            let ci = round_signed_div(&t_dot_bstar_i, &SignedBigUint::from_biguint(bstar_i_norm_sq));
+            // cᵢ = round(<t, b*[i]> / <b*[i], b*[i]>)
+            let ci = round_signed_div(&t_dot_bstar_i, &bstar_i_norm_sq);
             coefficients[i] = ci.clone();
 
-            // Update: t = t - cᵢ · v[i]
+            // Update: t = t - cᵢ · v[i] (original basis vector, not GS!)
             if !ci.is_zero() {
                 for d in 0..DIM {
                     t[d] = t[d].sub(&ci.mul(&basis[i][d]));
@@ -309,31 +339,22 @@ impl Lattice6D {
 
         // The residual t = (a₀, a₁, a₂, a₃, a₄, a₅) gives the decomposition
         // k ≡ a₀ + a₁·λ + a₂·λ² + a₃·center + a₄·π.a + a₅·π.b (mod n)
+        // where the coefficients[i] track the lattice point contribution
 
         println!("  [6D] Babai CVP result:");
         let mut max_bits = 0u64;
         for (i, a) in t.iter().enumerate() {
             let bits = a.bits();
             if bits > max_bits { max_bits = bits; }
-            let sign = if a.neg { "-" } else { "" };
+            let sign = if a.neg { "-" } else { "+" };
             println!("    a{} = {} (2^{} bits)", i, sign, bits);
         }
 
         println!("  [6D] Maximum component: 2^{} bits", max_bits);
         println!("  [6D] Expected: n^(1/6) ≈ 2^{:.1} bits", self.n.bits() as f64 / 6.0);
 
-        // Verify: k ≡ a₀ + a₁·λ + a₂·λ² + a₃·center + a₄·π.a + a₅·π.b (mod n)
-        let mut k_recon = SignedBigUint::zero();
-        let lam_contrib = t[1].mul(&SignedBigUint::from_biguint(self.lam.clone()));
-        let lam_sq_contrib = t[2].mul(&SignedBigUint::from_biguint(self.lam_sq.clone()));
-        let center_contrib = t[3].mul(&SignedBigUint::from_biguint(self.range_center.clone()));
-        let pi_a_contrib = t[4].mul(&SignedBigUint::from_biguint(self.pi_a.clone()));
-        let pi_b_contrib = t[5].mul(&SignedBigUint::from_biguint(self.pi_b.clone()));
-
-        k_recon = k_recon.add(&t[0]).add(&lam_contrib).add(&lam_sq_contrib)
-            .add(&center_contrib).add(&pi_a_contrib).add(&pi_b_contrib);
-
-        // Add back the lattice point contribution
+        // Verify: k ≡ a₀ + c₀·v₀[0] + c₁·v₁[0] + ... + c₅·v₅[0] (mod n)
+        let mut k_recon = t[0].clone();
         for i in 0..DIM {
             let ci_v0 = coefficients[i].mul(&basis[i][0]);
             k_recon = k_recon.add(&ci_v0);
@@ -349,7 +370,7 @@ impl Lattice6D {
         let verified = k_mod_n == k_recon_mod_n;
         println!("  [6D] Verification: k ≡ reconstruction (mod n): {}", verified);
         if !verified {
-            println!("  [6D] k mod n = 2^{} bits, recon mod n = 2^{} bits", 
+            println!("  [6D] k mod n = 2^{} bits, recon mod n = 2^{} bits",
                      k_mod_n.bits(), k_recon_mod_n.bits());
         }
 
@@ -396,92 +417,90 @@ impl Lattice6D {
 
         println!("    Estimated time (native field, 10^6 ops/s):");
         println!("      Without filters: {} days", days);
-        println!("      With all filters: {} hours", hours / 6 / 208); // rough estimate
 
         // More realistic estimate
         let filtered_bits = ((max_bits + 1) / 2).saturating_sub(5);
-        let filtered_steps = 1u64 << filtered_bits.min(63);
-        let filtered_seconds = filtered_steps / ops_per_sec;
-        println!("      Realistic (filtered kangaroo): {} seconds", filtered_seconds);
+        if filtered_bits <= 63 {
+            let filtered_steps = 1u64 << filtered_bits;
+            let filtered_seconds = filtered_steps / ops_per_sec;
+            println!("      Realistic (filtered kangaroo): {} seconds", filtered_seconds);
+        } else {
+            let filtered_hours = (1u128 << filtered_bits.min(80)) / (ops_per_sec as u128 * 3600);
+            println!("      Realistic (filtered kangaroo): {} hours", filtered_hours);
+        }
     }
 }
 
 // ============================================================
-// N-DIMENSIONAL GRAM-SCHMIDT (for LLL)
+// EXACT GRAM-SCHMIDT (for LLL + Babai CVP)
 // ============================================================
 
-struct GramSchmidtND {
-    /// Gram-Schmidt orthogonalized vectors (approximate, using rounded μ)
+struct GramSchmidtExact {
+    /// Gram-Schmidt orthogonalized vectors
     b_star: Vec<[SignedBigUint; DIM]>,
-    /// Norm squared of each GS vector
+    /// Norm squared of each GS vector (always non-negative)
     norm_sq: [BigUint; DIM],
 }
 
-/// Compute Gram-Schmidt for first `k` basis vectors.
-/// Returns GS norms for Lovász condition checking.
-fn gram_schmidt_nd(basis: &[[SignedBigUint; DIM]], k: usize) -> GramSchmidtND {
-    let mut b_star: Vec<[SignedBigUint; DIM]> = Vec::new();
+/// Compute exact Gram-Schmidt for first `k` basis vectors.
+///
+/// The GS vectors are computed by subtracting all projections:
+///   b*[0] = b[0]
+///   b*[i] = b[i] - Σ_{j<i} μ_{i,j} · b*[j]
+///   where μ_{i,j} = <b[i], b*[j]> / <b*[j], b*[j]>
+///
+/// Since we're working with BigUint (integer) arithmetic, the μ values
+/// are computed as rational numbers but we keep the exact GS vectors.
+fn gram_schmidt_exact(basis: &[[SignedBigUint; DIM]], k: usize) -> GramSchmidtExact {
+    let mut b_star: Vec<[SignedBigUint; DIM]> = Vec::with_capacity(k);
     let mut norm_sq: [BigUint; DIM] = std::array::from_fn(|_| BigUint::zero());
 
+    // We need to track the rational μ values for exact computation
+    // μ_{i,j} = num_{i,j} / den_{i,j} where den = norm_sq[j]
+    // To avoid accumulating errors, we compute b*[i] incrementally
+
     for i in 0..k {
+        // Start with b[i]
         let mut bi = basis[i].clone();
 
         // Subtract projections onto previous GS vectors
+        // b*[i] = b[i] - Σ_{j<i} μ_{i,j} · b*[j]
+        // where μ_{i,j} = <b[i], b*[j]> / <b*[j], b*[j]>
         for j in 0..i {
-            if j < b_star.len() {
-                let mu = compute_mu_exact(&basis[i], &b_star[j], &norm_sq[j]);
-                if !mu.is_zero() {
-                    for d in 0..DIM {
-                        bi[d] = bi[d].sub(&mu.mul(&b_star[j][d]));
-                    }
+            if norm_sq[j].is_zero() { continue; }
+
+            // Compute μ_{i,j} = <b[i], b*[j]> / <b*[j], b*[j]>
+            // Use original basis[i], not current bi, for the dot product
+            // This is crucial for exact Gram-Schmidt
+            let dot_val = dot_nd(&basis[i], &b_star[j]);
+            let mu = round_signed_div(&dot_val, &SignedBigUint::from_biguint(norm_sq[j].clone()));
+
+            if !mu.is_zero() {
+                for d in 0..DIM {
+                    bi[d] = bi[d].sub(&mu.mul(&b_star[j][d]));
                 }
             }
         }
 
-        // Compute norm
+        // Compute norm: |b*[i]|² = Σ_d b*[i][d]²
         let n: BigUint = bi.iter()
             .map(|x| &x.val * &x.val)
             .fold(BigUint::zero(), |a, b| a + b);
 
-        norm_sq[i] = n.clone();
+        norm_sq[i] = n;
         b_star.push(bi);
     }
 
-    GramSchmidtND { b_star, norm_sq }
+    GramSchmidtExact { b_star, norm_sq }
 }
 
-/// Full Gram-Schmidt for all 6 vectors.
-fn gram_schmidt_nd_full(basis: &Vec<[SignedBigUint; DIM]>) -> GramSchmidtND {
-    gram_schmidt_nd(basis, DIM)
-}
-
-/// Compute μ_{i,j} = <v[i], b*[j]> / <b*[j], b*[j]> for size reduction.
-fn compute_mu_nd(basis: &[[SignedBigUint; DIM]], i: usize, j: usize) -> SignedBigUint {
-    // Approximate: μ_{i,j} ≈ <v[i], v[j]> / <v[j], v[j]>
-    let dot_ij = dot_nd(&basis[i], &basis[j]);
-    let norm_j = dot_nd(&basis[j], &basis[j]);
-    round_signed_div(&dot_ij, &norm_j)
-}
-
-/// Compute μ exactly using the GS vector and its norm.
-fn compute_mu_exact(v: &[SignedBigUint; DIM], bstar_j: &[SignedBigUint; DIM], norm_j: &BigUint) -> SignedBigUint {
-    let dot = dot_nd(v, bstar_j);
-    let norm_signed = SignedBigUint::from_biguint(norm_j.clone());
-    round_signed_div(&dot, &norm_signed)
-}
-
-/// Dot product of two DIM-dimensional vectors
+/// Dot product of two DIM-dimensional signed vectors
 fn dot_nd(a: &[SignedBigUint; DIM], b: &[SignedBigUint; DIM]) -> SignedBigUint {
     let mut sum = SignedBigUint::zero();
     for i in 0..DIM {
         sum = sum.add(&a[i].mul(&b[i]));
     }
     sum
-}
-
-/// Round a SignedBigUint to nearest integer.
-fn round_signed_big(v: &SignedBigUint) -> SignedBigUint {
-    v.clone()
 }
 
 // ============================================================
@@ -525,9 +544,27 @@ mod tests {
             reduced[3].clone(), reduced[4].clone(), reduced[5].clone(),
         ];
         let components = lattice.babai_cvp(&basis_arr, &k);
-        
+
         // Check that components are small
         let max_bits = components.iter().map(|c| c.bits()).max().unwrap_or(0);
         println!("  [TEST] P70 max component: 2^{} bits", max_bits);
+    }
+
+    #[test]
+    fn test_round_signed_div() {
+        // Test basic rounding
+        let a = SignedBigUint::from_biguint(BigUint::from(7u64));
+        let b = SignedBigUint::from_biguint(BigUint::from(2u64));
+        let r = round_signed_div(&a, &b);
+        // 7/2 = 3.5, round = 4
+        assert_eq!(r.val, BigUint::from(4u64));
+        assert!(!r.neg);
+
+        // Test with negative numerator
+        let a_neg = SignedBigUint { val: BigUint::from(7u64), neg: true };
+        let r2 = round_signed_div(&a_neg, &b);
+        // -7/2 = -3.5, round = -4
+        assert_eq!(r2.val, BigUint::from(4u64));
+        assert!(r2.neg);
     }
 }

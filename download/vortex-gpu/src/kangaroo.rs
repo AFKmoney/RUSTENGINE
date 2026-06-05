@@ -7,8 +7,8 @@
 //!   - Mixed addition (Jacobian + affine = cheapest)
 //!
 //! Each hop = ONE mixed addition (8M + 3S ≈ 11 field muls)
-//! At ~355 field muls per hop (with modinv) → now ~11 muls per hop!
-//! Expected speed: ~10^6 hops/s on CPU (vs ~575 before)
+//! With native reduce512(): ~10-100x faster per mul!
+//! Expected speed: ~10^6 hops/s on CPU
 //!
 //! With 6D lattice giving 2^45 components:
 //!   Kangaroo O(√N) = O(2^22.5) ≈ 6M hops → ~6 seconds
@@ -115,8 +115,7 @@ impl KangarooOptimized {
             .map(|j| {
                 let step_bits = (step_start + j as u32) as usize;
                 let step_scalar = Fe::power_of_2(step_bits as u32);
-                let p = g.scalar_mul(&step_scalar);
-                p
+                g.scalar_mul(&step_scalar)
             })
             .collect();
 
@@ -140,10 +139,11 @@ impl KangarooOptimized {
     #[inline]
     fn hash_to_step(&self, point: &JacobianPoint) -> usize {
         if point.z.is_zero() { return 0; }
-        // Use the raw X coordinate (no need to normalize to affine)
-        // Just use low bits of X as pseudo-random
-        let x_bytes = point.x.to_bytes();
-        ((x_bytes[31] as usize) | ((x_bytes[30] as usize) << 8)) % NUM_STEPS
+        // Use the raw X coordinate low bits as pseudo-random
+        // No need to normalize to affine — just use raw X
+        let x0 = point.x.limbs[0];
+        let x1 = point.x.limbs[1];
+        ((x0 as usize) | ((x1 as usize) << 8)) % NUM_STEPS
     }
 
     /// Fast kangaroo solver with Jacobian coordinates.
@@ -151,9 +151,10 @@ impl KangarooOptimized {
     /// KEY OPTIMIZATIONS vs v4:
     ///   1. Jacobian coordinates → no inversion per hop
     ///   2. Mixed addition (Jacobian + affine) → 8M+3S vs 12M+4S
-    ///   3. Native u64x4 field → 10-100x faster per mul
+    ///   3. Native u64x4 field with reduce512() → 10-100x faster per mul
     ///   4. 32 step sizes (vs 16) → better pseudo-random walk
-    ///   5. DP check on Jacobian X (no need to normalize)
+    ///   5. DP check on raw X bytes first (fast pre-filter)
+    ///   6. mul_mod_n for scalar distance tracking (native speed)
     ///
     /// Expected: ~10^6 hops/s on modern CPU
     pub fn solve(&self, range_start: &Fe, range_end: &Fe, max_hops: u64) -> KangarooResult {
@@ -162,6 +163,7 @@ impl KangarooOptimized {
         println!("\n  [KANG] === Optimized Pollard Kangaroo + GLV (Native Field) ===");
         println!("  [KANG] Using Jacobian coordinates (no inversion per hop!)");
         println!("  [KANG] Mixed addition: 8M+3S per hop");
+        println!("  [KANG] Native reduce512() — zero BigUint in mul()!");
 
         let range_bits = range_start.bit_length();
         println!("  [KANG] Range: [2^{}, 2^{})", range_bits - 1, range_bits);
@@ -319,17 +321,15 @@ impl KangarooOptimized {
 /// Returns the x-coordinate bytes (normalized) if distinguished, else None.
 ///
 /// Distinguished = low DP_MASK_BITS bits of x are zero.
-/// We check the raw X coordinate (not normalized by Z²).
-/// This is fine because if X/Z² has low bits zero, we'll detect it.
-/// We normalize only when we need to store the DP.
+/// Optimization: First check raw X low bytes (no normalization needed).
+/// Only normalize when the raw check passes.
 fn check_dp_jacobian(point: &JacobianPoint) -> Option<DPKey> {
     if point.z.is_zero() { return None; }
 
-    // Quick check: use raw X bytes for hashing
-    let x_bytes = point.x.to_bytes();
-
-    // Check low byte
-    if x_bytes[31] != 0 { return None; }
+    // Quick pre-filter: check raw X low byte
+    // If the normalized x has low bits zero, the raw X often does too
+    let x0 = point.x.limbs[0];
+    if x0 & 0xFF != 0 { return None; }
 
     // Need to normalize to get actual x = X/Z²
     let z_inv = point.z.modinv();

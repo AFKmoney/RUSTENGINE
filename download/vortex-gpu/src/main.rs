@@ -153,6 +153,7 @@ fn run_kangaroo(target_point: &Point, range_start: &Fe, range_end: &Fe, max_hops
     println!("\n  Native u64x4 field: 10-100x faster per mul");
     println!("  Jacobian coordinates: no inversion per hop");
     println!("  Mixed addition: 8M+3S per hop (vs ~355M with affine)");
+    println!("  Native reduce512(): zero BigUint in hot path!");
 
     let result = kangaroo.solve(range_start, range_end, max_hops);
 
@@ -261,28 +262,36 @@ fn run_lattice(range_bits: u32) {
 }
 
 // ============================================================
-// FULL PIPELINE MODE
+// FULL 6D PIPELINE MODE
 // ============================================================
 
 fn run_pipeline(oracle: &Round0Oracle, target_point: &Point, range_bits: u32, max_hops: u64) {
     println!("\n╔══════════════════════════════════════════════════════════╗");
-    println!("║  FULL PIPELINE: All Inventions + Optimizations           ║");
+    println!("║  FULL 6D PIPELINE: All Inventions + Optimizations        ║");
     println!("╚══════════════════════════════════════════════════════════╝");
+
+    let pipeline_start = Instant::now();
 
     let range_start = Fe::power_of_2(range_bits - 1);
     let range_end = Fe::power_of_2(range_bits);
 
     // === STEP 1: SHA-256 Round 0 Oracle ===
-    println!("\n  Step 1: SHA-256 Round 0 Oracle (208x filter)");
+    println!("\n  ── Step 1: SHA-256 Round 0 Oracle (208x filter) ──");
     oracle.print_summary();
 
     // === STEP 2: Z[omega] DLP Lifting ===
-    println!("\n  Step 2: Z[omega] DLP Lifting (3x unit ambiguity)");
+    println!("\n  ── Step 2: Z[omega] DLP Lifting (3x unit ambiguity) ──");
     let lifter = ZOmegaDLPLifter::new();
     lifter.frobenius_structure();
 
+    if let Some(ref pi) = lifter.pi {
+        println!("  [PIPE] π found: {} ({} bits)", pi, pi.norm().bits());
+    } else {
+        println!("  [PIPE] WARNING: π not found, using fallback lattice");
+    }
+
     // === STEP 3: 6D Range-Constrained Lattice ===
-    println!("\n  Step 3: 6D Range-Constrained Lattice (2^256 → 2^45)");
+    println!("\n  ── Step 3: 6D Range-Constrained Lattice (2^256 → 2^45) ──");
     let range_start_big = BigUint::from(1u64) << (range_bits - 1);
     let range_end_big = BigUint::from(1u64) << range_bits;
     let mut lattice6d = Lattice6D::new(range_start_big, range_end_big);
@@ -294,15 +303,36 @@ fn run_pipeline(oracle: &Round0Oracle, target_point: &Point, range_bits: u32, ma
     let basis6d = lattice6d.build_basis();
     let reduced6d = lattice6d.lll_reduce(&basis6d);
 
+    // Validate on P70 if this is P70
+    let mut decomposition_ok = false;
+    if range_bits == 70 {
+        let k_p70 = BigUint::parse_bytes(b"6c3a4f", 16).unwrap();
+        println!("\n  ── P70 VALIDATION ──");
+        let basis_arr: [[lattice6d::SignedBigUint; 6]; 6] = [
+            reduced6d[0].clone(), reduced6d[1].clone(), reduced6d[2].clone(),
+            reduced6d[3].clone(), reduced6d[4].clone(), reduced6d[5].clone(),
+        ];
+        let components = lattice6d.babai_cvp(&basis_arr, &k_p70);
+        lattice6d.analyze_search_space(&components);
+
+        let max_bits = components.iter().map(|c| c.bits()).max().unwrap_or(0);
+        decomposition_ok = max_bits < 50; // Should be ~23 bits for P70
+        println!("  [PIPE] P70 decomposition: {} (expected < 50 bits)", max_bits);
+    }
+
     // === STEP 4: Optimized Kangaroo ===
-    println!("\n  Step 4: Optimized Kangaroo (native field + Jacobian)");
+    println!("\n  ── Step 4: Optimized Kangaroo (native field + Jacobian) ──");
+    println!("  [PIPE] Native u64x4 field with reduce512() — zero BigUint in hot path");
+    println!("  [PIPE] Jacobian coordinates: no inversion per hop");
+    println!("  [PIPE] Mixed addition: 8M+3S per hop");
+
     let kangaroo = KangarooOptimized::new_with_range(*target_point, range_bits);
     let result = kangaroo.solve(&range_start, &range_end, max_hops);
 
     if result.found {
         if let Some(k) = result.k {
             println!("\n  ╔══════════════════════════════════════╗");
-            println!("  ║  KEY FOUND via Pipeline!              ║");
+            println!("  ║  KEY FOUND via 6D Pipeline!           ║");
             println!("  ║  k = {}  ║", k);
             println!("  ╚══════════════════════════════════════╝");
         }
@@ -312,24 +342,29 @@ fn run_pipeline(oracle: &Round0Oracle, target_point: &Point, range_bits: u32, ma
     }
 
     // === Combined analysis ===
-    println!("\n  COMBINED PIPELINE ANALYSIS (v5):");
+    let pipeline_elapsed = pipeline_start.elapsed().as_secs_f64();
+    println!("\n  ═══════════════════════════════════════════════════════");
+    println!("  COMBINED 6D PIPELINE ANALYSIS (v5):");
     println!("    Step 1: Oracle => x-coordinate prediction (208x filter)");
     println!("    Step 2: Z[omega] => Frobenius structure (3x unit ambiguity)");
     println!("    Step 3: 6D Lattice => 2^256 → 2^45 per component");
     println!("    Step 4: Kangaroo => O(sqrt(2^45)) = O(2^22.5) hops");
     println!("  ");
     println!("  OPTIMIZATION STACK:");
-    println!("    - Native u64x4 field: 10-100x faster arithmetic");
+    println!("    - Native u64x4 field with reduce512(): 10-100x faster");
     println!("    - Jacobian coordinates: no inversion per hop");
     println!("    - Mixed addition: 8M+3S per hop");
     println!("    - 6D lattice: n^(1/6) ≈ 2^45 components");
     println!("    - 6x automorphism: √6 speedup");
     println!("    - 208x oracle: massive filter");
     println!("  ");
-    println!("  Timing estimates (10^6 hops/s):");
+    println!("  Timing estimates (10^6 hops/s with native field):");
     println!("    O(2^22.5) kangaroo: ~6 seconds");
     println!("    O(2^33.5) realistic: ~2 hours");
     println!("    O(2^45) worst case: ~1 year (needs GPU)");
+    println!("  ");
+    println!("  Total pipeline time: {:.2}s", pipeline_elapsed);
+    println!("  ═══════════════════════════════════════════════════════");
 }
 
 // ============================================================
@@ -438,7 +473,7 @@ fn main() {
     println!("    3. Optimized Kangaroo (Jacobian + native field)");
     println!("    4. 6D Range-Constrained Lattice (n^(1/6) ≈ 2^45)");
     println!("  Optimizations:");
-    println!("    - Native u64x4 field arithmetic (10-100x faster)");
+    println!("    - Native u64x4 field arithmetic with reduce512() (10-100x)");
     println!("    - Jacobian coordinates (no inversion per hop)");
     println!("    - Mixed addition: 8M+3S per hop");
     println!();
@@ -554,6 +589,9 @@ fn run_test_mode() {
     let k_p70 = Fe::from_u64(0x6c3a4f);
     let q_p70 = g.scalar_mul(&k_p70);
     println!("  P70: Q = 0x6c3a4f * G on curve: {}", q_p70.is_on_curve());
+    println!("  P70: Q.x = {}", q_p70.x);
+    let expected_x = Fe::from_hex("94d991ef2a38291416f959de8f80769e0a74d7f81a49267f50b2de1a34dbc2df");
+    println!("  P70: Q.x matches expected: {}", q_p70.x == expected_x);
 
     // Test 4: GLV phi
     let phi_g = g.glv_phi();
@@ -567,22 +605,36 @@ fn run_test_mode() {
     let beta_cu = beta_sq.mul(&beta);
     println!("  Beta^3 = 1 mod P: {}", beta_cu == Fe::ONE);
 
-    // Test 6: Benchmark — count EC ops/s
-    println!("\n  Benchmark: Scalar multiplication speed...");
-    let bench_start = Instant::now();
-    let bench_iters = 100;
-    for i in 0..bench_iters {
-        let k = Fe::from_u64(i as u64 + 1);
-        let _p = g.scalar_mul(&k);
-    }
-    let bench_elapsed = bench_start.elapsed().as_secs_f64();
-    let bench_rate = bench_iters as f64 / bench_elapsed;
-    println!("  Scalar mul rate: {:.1} ops/s", bench_rate);
+    // Test 6: Decompression test for P70
+    println!("\n  Decompression test for P70...");
+    let x70 = Fe::from_hex("94d991ef2a38291416f959de8f80769e0a74d7f81a49267f50b2de1a34dbc2df");
+    let x_sq = x70.mul(&x70);
+    let x_cu = x_sq.mul(&x70);
+    let y_sq = x_cu.add(&Fe::from_u64(7));
+    let exp = Fe::from_hex("3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFF0C");
+    let y = y_sq.pow(&exp);
+    let y_sq_check = y.mul(&y);
+    println!("  y^2 == x^3+7: {}", y_sq_check == y_sq);
 
-    // Test 7: Kangaroo benchmark — count hops/s
-    println!("\n  Benchmark: Kangaroo hop rate...");
+    // Try both y values
+    let p1 = Point { x: x70, y, inf: false };
+    let p2 = Point { x: x70, y: y.neg_mod_p(), inf: false };
+    println!("  P70 +y on curve: {}", p1.is_on_curve());
+    println!("  P70 -y on curve: {}", p2.is_on_curve());
+
+    // Cross-check with computed Q70
+    if p1.y == q_p70.y || p2.y == q_p70.y {
+        println!("  P70 decompression MATCHES Q70!");
+    } else {
+        println!("  P70 decompression MISMATCH");
+        println!("    decompressed y: {}", y);
+        println!("    Q70.y:          {}", q_p70.y);
+    }
+
+    // Test 7: Kangaroo hop benchmark
+    println!("\n  Benchmark: Kangaroo hop rate (Jacobian mixed add)...");
     let bench_start = Instant::now();
-    let bench_hops = 10000;
+    let bench_hops = 10_000;
     let mut pt = g.to_jacobian();
     let step_point = g.scalar_mul(&Fe::from_u64(12345));
     for _ in 0..bench_hops {
