@@ -1,4 +1,4 @@
-//! VORTEX PRIME v4 — GLV Decomposition & Automorphism Group
+//! VORTEX PRIME v5 — GLV Decomposition & Automorphism Group
 //! 6 automorphisms + 3 endomorphisms for secp256k1
 
 use crate::field::Fe;
@@ -37,19 +37,21 @@ impl GLVDecomposer {
     }
 
     /// 2-way GLV decomposition: k = a + b*lambda mod n
+    /// NOTE: This gives |a|, |b| ~ sqrt(n) ~ 2^128
+    /// For smaller components, use the 6D lattice instead.
     pub fn decompose_2way(&self, k: &Fe) -> (Fe, Fe) {
         let b = k.mul(&self.lambda_inv);
-        let a = k.sub(&b.mul(&self.lambda));
+        let a = k.sub_mod_n(&b.mul(&self.lambda));
         (a, b)
     }
 
     /// Get the 6 automorphism multipliers
     pub fn automorphism_scalars(&self, k: &Fe) -> [Fe; 6] {
-        let neg_k = self.n.sub(k);
+        let neg_k = k.neg_mod_n();
         let lam_k = k.mul(&self.lambda);
-        let neg_lam_k = self.n.sub(&lam_k);
+        let neg_lam_k = lam_k.neg_mod_n();
         let lam2_k = k.mul(&self.lambda_sq);
-        let neg_lam2_k = self.n.sub(&lam2_k);
+        let neg_lam2_k = lam2_k.neg_mod_n();
         [*k, neg_k, lam_k, neg_lam_k, lam2_k, neg_lam2_k]
     }
 
