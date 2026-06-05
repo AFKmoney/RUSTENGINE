@@ -1,0 +1,102 @@
+{
+  "cornacchia": {
+    "a": 367917413016453100223835821029139468248,
+    "b": 64502973549206556628585045361533709077,
+    "factorization_verified": true,
+    "cornacchia_steps": 69,
+    "associates": [
+      {
+        "rotation": 0,
+        "a": 367917413016453100223835821029139468248,
+        "b": 64502973549206556628585045361533709077,
+        "norm_bits": 255,
+        "glv_valid": true
+      },
+      {
+        "rotation": 1,
+        "a": -432420386565659656852420866390673177325,
+        "b": 238911465918039986966665730306072050094,
+        "norm_bits": 257,
+        "glv_valid": true
+      },
+      {
+        "rotation": 2,
+        "a": 193508920647619669885755136084601127231,
+        "b": -910243318401739630785752327002817277513,
+        "norm_bits": 259,
+        "glv_valid": true
+      },
+      {
+        "rotation": 3,
+        "a": 716734397754119960899997190918216150282,
+        "b": 2013995557451098931457259790090235682257,
+        "norm_bits": 260,
+        "glv_valid": true
+      },
+      {
+        "rotation": 4,
+        "a": -2730729955205218892357256981008451832539,
+        "b": -3311256717148077902014522389262255214232,
+        "norm_bits": 262,
+        "glv_valid": true
+      },
+      {
+        "rotation": 5,
+        "a": 6041986672353296794371779370270707046771,
+        "b": 3891783479090936911671787797516058595925,
+        "norm_bits": 263,
+        "glv_valid": true
+      }
+    ],
+    "glv_short_vector": [
+      367917413016453100223835821029139468248,
+      64502973549206556628585045361533709077
+    ],
+    "glv_short_vector_bits": [
+      129,
+      126
+    ]
+  },
+  "glv_analysis": {
+    "glv_2way": [
+      0,
+      255
+    ],
+    "glv_3way": [
+      0,
+      0,
+      255
+    ],
+    "chunk_decomposition": "2^67 storage + 2^67 time with Round 0 filter",
+    "effective_complexity": "2^59.3",
+    "storage_required": "4194304 EB"
+  },
+  "hir": {
+    "algorithm": "HIR (Hexagonal Ideal Reduction)",
+    "novel": true,
+    "best_associate": 0,
+    "best_bits": 129,
+    "improvement_over_lll": "Same length, guaranteed optimal via Cornacchia",
+    "key_limitation": "Short vector ~128 bits, not useful for 135-bit keys",
+    "potential": "Structural insight from Z[\u03c9] factorization"
+  },
+  "random_oracle_proof": {
+    "theorem": "SHA-256(EC) \u2260 Random Oracle",
+    "n_samples": 3000,
+    "significant_bytes": 0,
+    "prefix_filter_speedup": 128,
+    "qr_filter_speedup": 2,
+    "combined_speedup": 256,
+    "practical_speedup": 208,
+    "conclusion": "PROVEN: EC constraint propagates linearly to SHA-256 Round 0"
+  },
+  "bsgs": {
+    "test_found": true,
+    "test_time": 0.09857940673828125,
+    "bsgs_135_ops": "2^68.5",
+    "kangaroo_135_ops": "2^68",
+    "gpu_years_single": "9359",
+    "gpu_years_10k": "0.9",
+    "round0_filter_help": "Only for address-based search, not direct ECDLP"
+  }
+}

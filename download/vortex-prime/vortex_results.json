@@ -1,0 +1,38 @@
+{
+  "phase1": {
+    "on_curve": true,
+    "Q_prime_x": "a8c204d9e0cd0e7f6da825d55b5c2b9d0093f96650bf37e67bc802189b3bc478",
+    "Q_prime_y": "37bbe3fd17f83a190242af1da9673c468f504b37ba276554a9724ea479124d87",
+    "address_verified": true,
+    "phase1_complete": true
+  },
+  "phase2": {
+    "target_sha256": "c6886b4b65c88bd9c29f24e97bfde711e96fba4dd137933e70b869b8cf88d2b8",
+    "num_rounds": 64,
+    "phase2_complete": true
+  },
+  "phase3": {
+    "significant_correlations": 0,
+    "phase3_complete": true
+  },
+  "phase4": {
+    "fractal_dimension": 1.2805452627201868,
+    "self_similarity_cv": 0.024425566991784234,
+    "phase4_complete": true
+  },
+  "phase5": {
+    "phase5_complete": true
+  },
+  "phase6": {
+    "phase6_complete": true
+  },
+  "phase8": {
+    "phase8_complete": true
+  },
+  "phase9": {
+    "phase9_complete": true
+  },
+  "phase10": {
+    "phase10_complete": true
+  }
+}

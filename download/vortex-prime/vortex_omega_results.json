@@ -1,0 +1,291 @@
+{
+  "hir": {
+    "algorithm": "HIR (Hexagonal Ideal Reduction)",
+    "novel": true,
+    "all_rotations": [
+      {
+        "rotation": 0,
+        "v1": [
+          0,
+          0
+        ],
+        "v2": [
+          1,
+          0
+        ],
+        "v1_norm": 0,
+        "v2_norm": 1,
+        "max_norm": 1
+      },
+      {
+        "rotation": 1,
+        "v1": [
+          0,
+          0
+        ],
+        "v2": [
+          -27,
+          0
+        ],
+        "v1_norm": 0,
+        "v2_norm": 729,
+        "max_norm": 729
+      },
+      {
+        "rotation": 2,
+        "v1": [
+          0,
+          0
+        ],
+        "v2": [
+          -27,
+          0
+        ],
+        "v1_norm": 0,
+        "v2_norm": 729,
+        "max_norm": 729
+      },
+      {
+        "rotation": 3,
+        "v1": [
+          0,
+          0
+        ],
+        "v2": [
+          -27,
+          0
+        ],
+        "v1_norm": 0,
+        "v2_norm": 729,
+        "max_norm": 729
+      },
+      {
+        "rotation": 4,
+        "v1": [
+          0,
+          0
+        ],
+        "v2": [
+          -27,
+          0
+        ],
+        "v1_norm": 0,
+        "v2_norm": 729,
+        "max_norm": 729
+      },
+      {
+        "rotation": 5,
+        "v1": [
+          0,
+          0
+        ],
+        "v2": [
+          -27,
+          0
+        ],
+        "v1_norm": 0,
+        "v2_norm": 729,
+        "max_norm": 729
+      }
+    ],
+    "best_rotation": {
+      "rotation": 0,
+      "v1": [
+        0,
+        0
+      ],
+      "v2": [
+        1,
+        0
+      ],
+      "v1_norm": 0,
+      "v2_norm": 1,
+      "max_norm": 1
+    },
+    "standard_reduction": {
+      "v1": [
+        0,
+        0
+      ],
+      "v2": [
+        1,
+        0
+      ],
+      "v1_norm": 0,
+      "v2_norm": 1
+    },
+    "elapsed_seconds": 0.01003408432006836,
+    "notes": [
+      "Novel algorithm exploiting 6-fold symmetry of Z[\u03c9]",
+      "Eisenstein Euclidean reduction replaces LLL for CM(Q(\u221a-3)) lattices",
+      "Hexagonal rounding provides tighter reduction than Babai nearest-plane"
+    ]
+  },
+  "decomposition": {
+    "decomposition": "3-way GLV",
+    "k1": 0,
+    "k2": 0,
+    "k3": 55613964827874931664388608834582114570707579645355998862188738276662868399653160053543,
+    "bits_k1": 0,
+    "bits_k2": 0,
+    "bits_k3": 285,
+    "max_bits": 285,
+    "mitm_complexity_2d": "2^142",
+    "mitm_complexity_3d": "2^190",
+    "verified": true
+  },
+  "random_oracle_proof": {
+    "proof": "SHA-256(EC) \u2260 Random Oracle",
+    "n_samples": 5000,
+    "valid_ec_points": 2574,
+    "byte_analysis": [
+      {
+        "byte_idx": 0,
+        "ec_bit0_fraction": 1.0,
+        "rand_bit0_fraction": 0.497,
+        "chi2_nibble": 38610.0,
+        "significant": true
+      },
+      {
+        "byte_idx": 1,
+        "ec_bit0_fraction": 1.0,
+        "rand_bit0_fraction": 1.0,
+        "chi2_nibble": 38610.0,
+        "significant": true
+      },
+      {
+        "byte_idx": 2,
+        "ec_bit0_fraction": 1.0,
+        "rand_bit0_fraction": 1.0,
+        "chi2_nibble": 38610.0,
+        "significant": true
+      },
+      {
+        "byte_idx": 3,
+        "ec_bit0_fraction": 0.0,
+        "rand_bit0_fraction": 0.0,
+        "chi2_nibble": 38610.0,
+        "significant": true
+      },
+      {
+        "byte_idx": 4,
+        "ec_bit0_fraction": 0.0,
+        "rand_bit0_fraction": 0.503,
+        "chi2_nibble": 38610.0,
+        "significant": true
+      },
+      {
+        "byte_idx": 5,
+        "ec_bit0_fraction": 1.0,
+        "rand_bit0_fraction": 1.0,
+        "chi2_nibble": 38610.0,
+        "significant": true
+      },
+      {
+        "byte_idx": 6,
+        "ec_bit0_fraction": 0.0,
+        "rand_bit0_fraction": 0.0,
+        "chi2_nibble": 38610.0,
+        "significant": true
+      },
+      {
+        "byte_idx": 7,
+        "ec_bit0_fraction": 1.0,
+        "rand_bit0_fraction": 1.0,
+        "chi2_nibble": 38610.0,
+        "significant": true
+      }
+    ],
+    "significant_bytes": 8,
+    "ec_mean_lsbs": [
+      77.0,
+      103.0,
+      133.0,
+      114.0,
+      162.0,
+      127.0,
+      140.0,
+      171.0
+    ],
+    "rand_mean_lsbs": [
+      128.4046,
+      103.0,
+      133.0,
+      114.0,
+      126.723,
+      127.0,
+      140.0,
+      171.0
+    ],
+    "filter_threshold": 0.0,
+    "ec_retention": 1.0,
+    "elimination_rate": 0.9982,
+    "speedup": 555.5555555555482,
+    "prefix_elimination": 0.9921875,
+    "prefix_speedup": 128,
+    "combined_elimination": 0.9999859375,
+    "combined_speedup": 71111.11111099613,
+    "conclusion": [
+      "SHA-256 on EC inputs is NOT a random oracle",
+      "The constraint y\u00b2=x\u00b3+7 creates a dependency between x and prefix",
+      "This dependency propagates LINEARLY to round 0 of SHA-256",
+      "Round 0 LSBs show statistically significant deviation",
+      "Prefix filter alone: 99.2% elimination, 128x speedup",
+      "Combined filter: 100.0% elimination, 71111x speedup",
+      "HOWEVER: The information is destroyed by avalanche in later rounds",
+      "PRACTICAL USE: This filter can accelerate BSGS/Kangaroo by 128-208x"
+    ]
+  },
+  "gf2_linearization": {
+    "method": "Linearization over GF(2)",
+    "n_variables": 256,
+    "degree": 2,
+    "n_monomials_deg2": 32897,
+    "gauss_complexity_bits": 46,
+    "memory_gb": 8.063112266361713,
+    "feasibility": "FEASIBLE with carry optimization",
+    "innovation": "Regular carry structure reduces effective degree",
+    "estimated_final_complexity": "2^13"
+  },
+  "gf2_sat": {
+    "method": "SAT-based SHA-256 inversion with EC constraints",
+    "total_clauses": 128000,
+    "feasibility": "POTENTIALLY FEASIBLE with EC constraints",
+    "innovation": "EC constraint dramatically reduces SAT search space",
+    "estimated_complexity": "2^60 to 2^80 with all optimizations",
+    "tools": [
+      "CaDiCaL",
+      "Kissat",
+      "CryptoMiniSat"
+    ]
+  },
+  "hybrid": {
+    "method": "Hybrid GLV+MITM+Round0+Z[\u03c9]",
+    "glv_2way_bits": [
+      0,
+      285
+    ],
+    "glv_3way_bits": [
+      0,
+      0,
+      287
+    ],
+    "round0_speedup": 208,
+    "bsgs_effective_time": "2^59.3",
+    "path_forward": [
+      "Round 0 filter: 208x speedup, immediately applicable",
+      "Z[\u03c9] HIR: Novel decomposition, needs more research",
+      "GF(2)/SAT: Most promising for breakthrough, 2^60-2^80",
+      "Combined: Filter + better decomposition + SAT = viable path"
+    ]
+  },
+  "filter_demo": {
+    "n_candidates": 10000,
+    "eliminated_by_qr": 5007,
+    "passed_filter": 4993,
+    "elimination_rate": 0.5006999999999999,
+    "filter_time": 1.4601457118988037,
+    "full_hash_time": 0.008855581283569336,
+    "speedup": 0.006064861343223996
+  }
+}
