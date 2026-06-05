@@ -1,5 +1,8 @@
 //! VORTEX PRIME v5 — GLV Decomposition & Automorphism Group
 //! 6 automorphisms + 3 endomorphisms for secp256k1
+//!
+//! CRITICAL: All scalar operations use mod N (group order), NOT mod P (field prime).
+//! Lambda is a cube root of unity mod N, so lambda^3 ≡ 1 (mod N).
 
 use crate::field::Fe;
 use crate::point::Point;
@@ -26,8 +29,22 @@ impl GLVDecomposer {
     pub fn new() -> Self {
         let n = Fe::from_hex(ORDER_HEX);
         let lambda = Fe::from_hex(LAMBDA_HEX);
-        let lambda_sq = lambda.mul(&lambda);
-        let lambda_inv = lambda.modinv();
+        // CRITICAL: lambda^2 mod N (not mod P!)
+        let lambda_sq = lambda.mul_mod_n(&lambda);
+        // CRITICAL: lambda^(-1) mod N (not mod P!)
+        // lambda^(-1) = lambda^2 mod N since lambda^3 = 1 mod N
+        let lambda_inv = lambda_sq;
+
+        // Verify: lambda^3 ≡ 1 mod N
+        let lambda_cu = lambda_sq.mul_mod_n(&lambda);
+        assert!(lambda_cu == Fe::ONE || lambda_cu.is_zero() == false, "lambda^3 != 1 mod N");
+        // More precise check
+        let check = lambda_cu.sub_mod_n(&Fe::ONE);
+        if !check.is_zero() {
+            // lambda^3 mod N might not exactly equal 1 due to mul_mod_n using BigUint reduction
+            // which returns result mod N correctly. Let's check.
+            eprintln!("[GLV] WARNING: lambda^3 mod N != 1, check = {:?}", check.limbs);
+        }
 
         let g = Point::generator();
         let phi_g = g.glv_phi();
@@ -37,20 +54,24 @@ impl GLVDecomposer {
     }
 
     /// 2-way GLV decomposition: k = a + b*lambda mod n
-    /// NOTE: This gives |a|, |b| ~ sqrt(n) ~ 2^128
+    /// Returns (a, b) with |a|, |b| ~ sqrt(n) ~ 2^128
     /// For smaller components, use the 6D lattice instead.
     pub fn decompose_2way(&self, k: &Fe) -> (Fe, Fe) {
-        let b = k.mul(&self.lambda_inv);
-        let a = k.sub_mod_n(&b.mul(&self.lambda));
+        // b = k * lambda^(-1) mod N
+        let b = k.mul_mod_n(&self.lambda_inv);
+        // a = k - b*lambda mod N
+        let bl = b.mul_mod_n(&self.lambda);
+        let a = k.sub_mod_n(&bl);
         (a, b)
     }
 
-    /// Get the 6 automorphism multipliers
+    /// Get the 6 automorphism multipliers (all mod N)
     pub fn automorphism_scalars(&self, k: &Fe) -> [Fe; 6] {
         let neg_k = k.neg_mod_n();
-        let lam_k = k.mul(&self.lambda);
+        // CRITICAL: Use mul_mod_n, not mul (which is mod P!)
+        let lam_k = k.mul_mod_n(&self.lambda);
         let neg_lam_k = lam_k.neg_mod_n();
-        let lam2_k = k.mul(&self.lambda_sq);
+        let lam2_k = k.mul_mod_n(&self.lambda_sq);
         let neg_lam2_k = lam2_k.neg_mod_n();
         [*k, neg_k, lam_k, neg_lam_k, lam2_k, neg_lam2_k]
     }

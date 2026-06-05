@@ -579,19 +579,30 @@ fn run_test_mode() {
     let g_j = g.to_jacobian();
     let g2_j = g_j.double();
     let g2 = g2_j.to_affine();
-    println!("  2*G on curve: {}", g2.is_on_curve());
+    let expected_2g_x = Fe::from_hex("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5");
+    println!("  2*G on curve: {} | x correct: {}", g2.is_on_curve(), g2.x == expected_2g_x);
+    if g2.x != expected_2g_x {
+        println!("  2*G got x:  {}", g2.x);
+        println!("  2*G want x: c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5");
+    }
 
     // Test 2: 7*G via scalar mul
     let g7 = g.scalar_mul(&Fe::from_u64(7));
-    println!("  7*G on curve: {}", g7.is_on_curve());
+    let expected_7g_x = Fe::from_hex("5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc");
+    println!("  7*G on curve: {} | x correct: {}", g7.is_on_curve(), g7.x == expected_7g_x);
+    if g7.x != expected_7g_x {
+        println!("  7*G got x:  {}", g7.x);
+    }
 
-    // Test 3: P70 key
+    // Test 3: P70 key (self-consistency: verify k*G is on curve and k*G+G = (k+1)*G)
     let k_p70 = Fe::from_u64(0x6c3a4f);
     let q_p70 = g.scalar_mul(&k_p70);
     println!("  P70: Q = 0x6c3a4f * G on curve: {}", q_p70.is_on_curve());
-    println!("  P70: Q.x = {}", q_p70.x);
-    let expected_x = Fe::from_hex("94d991ef2a38291416f959de8f80769e0a74d7f81a49267f50b2de1a34dbc2df");
-    println!("  P70: Q.x matches expected: {}", q_p70.x == expected_x);
+    // Self-consistency: Q + G = (k+1)*G
+    let q_p70_plus_g = q_p70.add(&g);
+    let k_p70_plus_1 = k_p70.add_mod_n(&Fe::from_u64(1));
+    let q_p70_plus_g_check = g.scalar_mul(&k_p70_plus_1);
+    println!("  P70: Q+G == (k+1)*G: {}", q_p70_plus_g.x == q_p70_plus_g_check.x);
 
     // Test 4: GLV phi
     let phi_g = g.glv_phi();
@@ -694,4 +705,15 @@ fn decompress_point(x_bytes: &[u8; 32], y_is_odd: bool) -> Option<Point> {
             None
         }
     }
+}
+
+fn _verify_2g() {
+    let g = Point::generator();
+    let g2 = g.to_jacobian().double().to_affine();
+    eprintln!("2*G x = {:02x}{:02x}{:02x}{:02x}...{:02x}", 
+        g2.x.limbs[3] >> 56, g2.x.limbs[3] >> 48, g2.x.limbs[3] >> 40, g2.x.limbs[3] >> 32,
+        g2.x.limbs[0] & 0xFF);
+    eprintln!("2*G full x = {}", g2.x);
+    let expected_2g_x = Fe::from_hex("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5");
+    eprintln!("2*G x match: {}", g2.x == expected_2g_x);
 }

@@ -117,16 +117,17 @@ impl Point {
     pub fn scalar_mul(&self, k: &Fe) -> Point {
         if k.is_zero() || self.inf { return Point::infinity(); }
 
-        let mut result = JacobianPoint::infinity();
-        let mut addend = self.to_jacobian();
-        let mut k_val = *k;
+        // Store the affine form for mixed addition (add_affine is verified correct)
+        let p_affine = *self;
 
-        while !k_val.is_zero() {
-            if k_val.limbs[0] & 1 == 1 {
-                result = result.add(&addend);
+        let mut result = JacobianPoint::infinity();
+        let bits = k.bit_length();
+
+        for i in (0..bits).rev() {
+            result = result.double();
+            if k.get_bit(i) {
+                result = result.add_affine(&p_affine);
             }
-            addend = addend.double();
-            k_val = k_val.shr1();
         }
         result.to_affine()
     }
@@ -245,8 +246,8 @@ impl JacobianPoint {
     ///
     /// Algorithm (standard Jacobian doubling for a = 0 curves):
     ///   A = Y₁²
-    ///   B = 4·X₁·A
-    ///   C = 8·A²
+    ///   B = 4·X₁·A = 4·X₁·Y₁²
+    ///   C = 8·A² = 8·Y₁⁴
     ///   D = 3·X₁² (since a = 0 for secp256k1)
     ///   X₃ = D² - 2·B
     ///   Y₃ = D·(B - X₃) - C
@@ -261,27 +262,17 @@ impl JacobianPoint {
             return Self::infinity();
         }
 
-        let y1_sq = self.y.sqr();              // A = Y₁²
-        let x1_sq = self.x.sqr();              // X₁²
+        let a = self.y.sqr();               // A = Y₁²
+        let b = self.x.mul(&a).add(&self.x.mul(&a))
+                       .add(&self.x.mul(&a)).add(&self.x.mul(&a));  // B = 4·X₁·Y₁²
+        let d = self.x.sqr().add(&self.x.sqr()).add(&self.x.sqr()); // D = 3·X₁² (a=0)
+        let c = a.sqr().add(&a.sqr()).add(&a.sqr())
+                     .add(&a.sqr()).add(&a.sqr()).add(&a.sqr())
+                     .add(&a.sqr()).add(&a.sqr());                   // C = 8·Y₁⁴
 
-        // S = 4·X₁·Y₁²
-        let s = self.x.mul(&y1_sq).add(&self.x.mul(&y1_sq));
-
-        // M = 3·X₁² (since a = 0 for secp256k1)
-        let m = x1_sq.add(&x1_sq).add(&x1_sq);
-
-        // X₃ = M² - 2·S
-        let x3 = m.sqr().sub(&s).sub(&s);
-
-        // Y₃ = 8·Y₁⁴ = 8·A²
-        let y1_4 = y1_sq.sqr();
-        let eight_y1_4 = y1_4.add(&y1_4).add(&y1_4).add(&y1_4).add(&y1_4).add(&y1_4).add(&y1_4).add(&y1_4);
-
-        // Y₃ = M·(S - X₃) - 8·Y₁⁴
-        let y3 = m.mul(&s.sub(&x3)).sub(&eight_y1_4);
-
-        // Z₃ = 2·Y₁·Z₁
-        let z3 = self.y.add(&self.y).mul(&self.z);
+        let x3 = d.sqr().sub(&b).sub(&b);  // X₃ = D² - 2·B
+        let y3 = d.mul(&b.sub(&x3)).sub(&c); // Y₃ = D·(B - X₃) - C
+        let z3 = self.y.add(&self.y).mul(&self.z); // Z₃ = 2·Y₁·Z₁
 
         JacobianPoint { x: x3, y: y3, z: z3 }
     }
@@ -404,22 +395,22 @@ impl JacobianPoint {
     }
 
     /// Standard scalar multiplication using Jacobian coordinates.
-    /// Much faster than affine because NO inversion per step.
+    /// Uses left-to-right double-and-add with mixed addition (add_affine).
     pub fn scalar_mul(&self, k: &Fe) -> Self {
         if k.is_zero() || self.z.is_zero() {
             return Self::infinity();
         }
 
+        // Convert to affine for mixed addition
+        let p_affine = self.to_affine();
         let mut result = Self::infinity();
-        let mut addend = *self;
-        let mut k_val = *k;
+        let bits = k.bit_length();
 
-        while !k_val.is_zero() {
-            if k_val.limbs[0] & 1 == 1 {
-                result = result.add(&addend);
+        for i in (0..bits).rev() {
+            result = result.double();
+            if k.get_bit(i) {
+                result = result.add_affine(&p_affine);
             }
-            addend = addend.double();
-            k_val = k_val.shr1();
         }
         result
     }
