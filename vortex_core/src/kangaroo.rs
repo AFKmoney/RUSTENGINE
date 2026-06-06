@@ -27,7 +27,7 @@ const ORDER_HEX: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8
 const NUM_STEPS: usize = 32;
 
 /// Distinguished point: low N bits of x are zero
-const DP_MASK_BITS: u32 = 10;
+const DP_MASK_BITS: u32 = 8;
 
 /// A distinguished point entry
 type DPKey = [u8; 32];
@@ -326,23 +326,22 @@ impl KangarooOptimized {
 fn check_dp_jacobian(point: &JacobianPoint) -> Option<DPKey> {
     if point.z.is_zero() { return None; }
 
-    // Quick pre-filter: check raw X low byte
-    // If the normalized x has low bits zero, the raw X often does too
+    // Phase 1: Fast pre-filter on raw X low bits
+    // This passes ~1/256 of the time (DP_MASK_BITS=8)
     let x0 = point.x.limbs[0];
-    if x0 & 0xFF != 0 { return None; }
+    let dp_mask = (1u64 << DP_MASK_BITS) - 1;
+    if x0 & dp_mask != 0 { return None; }
 
-    // Need to normalize to get actual x = X/Z²
+    // Phase 2: Normalize to get actual x = X/Z²
+    // Only done for ~1/256 of points, so the modinv cost is amortized
     let z_inv = point.z.modinv();
     let z_inv_sq = z_inv.mul(&z_inv);
     let x_normalized = point.x.mul(&z_inv_sq);
     let x_norm_bytes = x_normalized.to_bytes();
 
-    // Check distinguished point condition
-    // Low DP_MASK_BITS bits = 0
-    let bytes_to_check = ((DP_MASK_BITS + 7) / 8) as usize;
-    for i in (32 - bytes_to_check)..32 {
-        if x_norm_bytes[i] != 0 { return None; }
-    }
+    // Verify: low byte of normalized x is also zero
+    // (ensures both kangaroos agree on DP condition)
+    if x_norm_bytes[31] & (dp_mask as u8) != 0 { return None; }
 
     Some(x_norm_bytes)
 }
