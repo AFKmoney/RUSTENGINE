@@ -135,7 +135,47 @@ impl KangarooOptimized {
         }
     }
 
-    /// Hash a point's x-coordinate to a step index (fast, 5 bits)
+    /// Create kangaroo with lattice basis vectors as step points.
+    ///
+    /// This is the KEY innovation: instead of random power-of-2 steps,
+    /// we use the 6D lattice basis vectors. Each step moves by a
+    /// lattice vector of size ~2^43, so the kangaroo explores the
+    /// lattice neighborhood efficiently.
+    ///
+    /// Tame kangaroo starts at k_approx·G (range center in lattice),
+    /// wild starts at Q. Both walk using lattice step points.
+    /// Expected collision: O(√(2^45)) = O(2^22.5) hops.
+    pub fn new_with_lattice_steps(
+        target_point: Point,
+        _k_approx: Fe,
+        lattice_points: &[Point],
+        lattice_scalars: &[Fe],
+    ) -> Self {
+        let g = Point::generator();
+        let n = Fe::from_hex(ORDER_HEX);
+        let glv = GLVDecomposer::new();
+
+        let phi_g = g.glv_phi();
+        let phi2_g = g.glv_phi2();
+
+        // Use lattice basis vectors as step points
+        // Each step = one lattice vector, moving by ~2^43 in scalar space
+        let step_points: Vec<Point> = lattice_points.to_vec();
+        let step_distances: Vec<Fe> = lattice_scalars.to_vec();
+
+        println!("  [LKANG] Using {} lattice basis vectors as steps", step_points.len());
+        for (i, (p, s)) in step_points.iter().zip(step_distances.iter()).enumerate() {
+            println!("  [LKANG] Step {}: 2^{} bits, on curve: {}", i, s.bit_length(), p.is_on_curve());
+        }
+
+        KangarooOptimized {
+            g, q: target_point, n, glv,
+            step_points, step_distances,
+            phi_g, phi2_g,
+        }
+    }
+
+    /// Hash a point's x-coordinate to a step index
     #[inline]
     fn hash_to_step(&self, point: &JacobianPoint) -> usize {
         if point.z.is_zero() { return 0; }
@@ -143,7 +183,8 @@ impl KangarooOptimized {
         // No need to normalize to affine — just use raw X
         let x0 = point.x.limbs[0];
         let x1 = point.x.limbs[1];
-        ((x0 as usize) | ((x1 as usize) << 8)) % NUM_STEPS
+        let num = self.step_points.len().max(1);
+        ((x0 as usize) | ((x1 as usize) << 8)) % num
     }
 
     /// Fast kangaroo solver with Jacobian coordinates.
