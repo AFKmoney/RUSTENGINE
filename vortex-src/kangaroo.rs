@@ -327,21 +327,24 @@ fn check_dp_jacobian(point: &JacobianPoint) -> Option<DPKey> {
     if point.z.is_zero() { return None; }
 
     // Quick pre-filter: check raw X low byte
-    // This passes ~1/256 of the time, saving expensive normalization
+    // If the normalized x has low bits zero, the raw X often does too
     let x0 = point.x.limbs[0];
     if x0 & 0xFF != 0 { return None; }
 
-    // Normalize: x = X/Z² (expensive but only called 1/256 of hops)
+    // Need to normalize to get actual x = X/Z²
     let z_inv = point.z.modinv();
     let z_inv_sq = z_inv.mul(&z_inv);
     let x_normalized = point.x.mul(&z_inv_sq);
+    let x_norm_bytes = x_normalized.to_bytes();
 
-    // DP check: low DP_MASK_BITS bits of normalized x must be zero
-    // Using bitmask on limbs[0] (least significant limb) - correct bit-level check
-    let mask = (1u64 << DP_MASK_BITS) - 1;
-    if x_normalized.limbs[0] & mask != 0 { return None; }
+    // Check distinguished point condition
+    // Low DP_MASK_BITS bits = 0
+    let bytes_to_check = ((DP_MASK_BITS + 7) / 8) as usize;
+    for i in (32 - bytes_to_check)..32 {
+        if x_norm_bytes[i] != 0 { return None; }
+    }
 
-    Some(x_normalized.to_bytes())
+    Some(x_norm_bytes)
 }
 
 // ============================================================
