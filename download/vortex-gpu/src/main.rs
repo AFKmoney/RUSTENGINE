@@ -622,7 +622,7 @@ fn run_test_mode() {
     let x_sq = x70.mul(&x70);
     let x_cu = x_sq.mul(&x70);
     let y_sq = x_cu.add(&Fe::from_u64(7));
-    let exp = Fe::from_hex("3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFF0C");
+    let exp = Fe::from_hex("3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFFFF0C");
     let y = y_sq.pow(&exp);
     let y_sq_check = y.mul(&y);
     println!("  y^2 == x^3+7: {}", y_sq_check == y_sq);
@@ -677,14 +677,34 @@ fn decompress_point(x_bytes: &[u8; 32], y_is_odd: bool) -> Option<Point> {
     let x = Fe::from_bytes(x_bytes);
 
     // y^2 = x^3 + 7 (mod p)
-    let x_sq = x.mul(&x);
-    let x_cu = x_sq.mul(&x);
-    let y_sq = x_cu.add(&Fe::from_u64(7));
+    let y_sq = x.mul(&x).mul(&x).add(&Fe::from_u64(7));
 
-    // y = y_sq^((p+1)/4) mod p  (since p ≡ 3 mod 4)
-    let exp = Fe::from_hex("3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFF0C");
-    let y = y_sq.pow(&exp);
-
+    // Compute y = y_sq^((p+1)/4) using BigUint for correctness
+    // (the native pow() has a subtle bug in bit iteration)
+    let y_sq_big = y_sq.to_biguint();
+    let p_big = num_bigint::BigUint::parse_bytes(
+        b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16
+    ).unwrap();
+    let exp_big = num_bigint::BigUint::parse_bytes(
+        b"3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFFFF0C", 16
+    ).unwrap();
+    
+    // Manual binary exponentiation using BigUint modular arithmetic
+    let mut result = num_bigint::BigUint::from(1u64);
+    let mut base = y_sq_big.clone();
+    let bits = exp_big.bits() as usize;
+    for i in (0..bits).rev() {
+        result = (&result * &result) % &p_big;
+        if exp_big.bit(i as u64) {
+            result = (&result * &base) % &p_big;
+        }
+    }
+    
+    eprintln!("[DECOMP] BigUint pow result: {}", result);
+    eprintln!("[DECOMP] y_sq expected: {}", y_sq.to_biguint());
+    let y = Fe::from_biguint(&result);
+    eprintln!("[DECOMP] y from BigUint: {}", y);
+    
     // Adjust parity
     let y_parity = y.limbs[0] & 1 == 1;
     let y_final = if y_parity != y_is_odd {
