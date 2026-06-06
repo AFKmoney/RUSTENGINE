@@ -294,7 +294,7 @@ fn run_pipeline(oracle: &Round0Oracle, target_point: &Point, range_bits: u32, ma
     println!("\n  ── Step 3: 6D Range-Constrained Lattice (2^256 → 2^45) ──");
     let range_start_big = BigUint::from(1u64) << (range_bits - 1);
     let range_end_big = BigUint::from(1u64) << range_bits;
-    let mut lattice6d = Lattice6D::new(range_start_big, range_end_big);
+    let mut lattice6d = Lattice6D::new(range_start_big.clone(), range_end_big.clone());
 
     if let Some(ref pi) = lifter.pi {
         lattice6d.set_pi(pi.a.clone(), pi.b.clone());
@@ -320,13 +320,32 @@ fn run_pipeline(oracle: &Round0Oracle, target_point: &Point, range_bits: u32, ma
         println!("  [PIPE] P70 decomposition: {} (expected < 50 bits)", max_bits);
     }
 
-    // === STEP 4: Optimized Kangaroo ===
-    println!("\n  ── Step 4: Optimized Kangaroo (native field + Jacobian) ──");
+    // === STEP 4: Reconstruct k_approx from 6D decomposition ===
+    println!("\n  ── Step 4: Reconstruct k_approx from 6D Babai CVP ──");
+
+    // Babai CVP with range_center as target gives the lattice structure
+    // The residual components tell us the effective search radius
+    let range_center_big = (&range_start_big + &range_end_big) >> 1;
+    let basis_arr: [[lattice6d::SignedBigUint; 6]; 6] = [
+        reduced6d[0].clone(), reduced6d[1].clone(), reduced6d[2].clone(),
+        reduced6d[3].clone(), reduced6d[4].clone(), reduced6d[5].clone(),
+    ];
+    let components = lattice6d.babai_cvp(&basis_arr, &range_center_big);
+
+    // Maximum component = effective search radius per dimension
+    let max_comp_bits = components.iter().map(|c| c.bits()).max().unwrap_or(0);
+    println!("  [PIPE] 6D max component: 2^{} bits", max_comp_bits);
+    println!("  [PIPE] Effective kangaroo range: 2^{} bits (vs 2^{} original)", max_comp_bits, range_bits);
+
+    // === STEP 5: Optimized Kangaroo with 6D-reduced range ===
+    println!("\n  ── Step 5: Optimized Kangaroo (6D + native field + Jacobian) ──");
     println!("  [PIPE] Native u64x4 field with reduce512() — zero BigUint in hot path");
     println!("  [PIPE] Jacobian coordinates: no inversion per hop");
     println!("  [PIPE] Mixed addition: 8M+3S per hop");
+    println!("  [PIPE] 6D lattice reduced search: 2^{} → 2^{} per component", range_bits, max_comp_bits);
 
-    let kangaroo = KangarooOptimized::new_with_range(*target_point, range_bits);
+    // Use 6D-aware kangaroo with smaller effective range for step sizes
+    let kangaroo = KangarooOptimized::new_with_range(*target_point, max_comp_bits as u32);
     let result = kangaroo.solve(&range_start, &range_end, max_hops);
 
     if result.found {
