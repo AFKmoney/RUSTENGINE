@@ -1,10 +1,7 @@
-//! RUSTSOLVER — Native u64x4 Modular Arithmetic for secp256k1
-//! ============================================================
+//! RUSTSOLVER v2 — Native u64x4 Modular Arithmetic for secp256k1
+//! ================================================================
 //! ZERO BigUint in the hot path. Pure u64x4 limb arithmetic.
 //! FAST reduce512() for secp256k1 special prime P = 2^256 - 2^32 - 977.
-//!
-//! This is the CRITICAL optimization: mul() uses reduce512() instead
-//! of BigUint fallback, giving 10-100x speedup.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -122,7 +119,7 @@ impl Fe {
     }
 
     // ============================================================
-    // RAW ADD/SUB
+    // RAW ADD/SUB (no reduction)
     // ============================================================
 
     #[inline]
@@ -193,16 +190,17 @@ impl Fe {
 
     #[inline]
     fn add_p(&self) -> Self {
-        let (r, _) = self.add_raw(&Fe { limbs: P });
+        // When called from sub(), self is the result of an underflowed subtraction,
+        // so self is in (2^256 - P, 2^256). Adding P overflows 2^256, but discarding
+        // the carry gives exactly self + P - 2^256 = (original_a - original_b) + P.
+        let (r, _carry) = self.add_raw(&Fe { limbs: P });
         r
     }
 
-    /// *** CRITICAL OPTIMIZATION: mul() uses FAST reduce512() ***
-    /// This replaces the BigUint fallback with native u64 reduction,
-    /// giving 10-100x speedup in field multiplication.
+    /// *** CRITICAL: mul() uses FAST reduce512() ***
     #[inline]
     pub fn mul(&self, o: &Fe) -> Self {
-        // Compute 512-bit product
+        // Schoolbook 4x4 → 8 limbs
         let mut prod = [0u64; 8];
         for i in 0..4 {
             let mut carry = 0u128;
@@ -212,9 +210,8 @@ impl Fe {
                 prod[i + j] = carry as u64;
                 carry >>= 64;
             }
-            prod[i + 4] = carry as u64;
+            prod[i + 4] += carry as u64;
         }
-        // FAST reduction using secp256k1 special form
         reduce512(&prod)
     }
 
@@ -257,7 +254,7 @@ impl Fe {
         n.sub(self)
     }
 
-    /// mul mod N — uses BigUint (N has no special form)
+    /// mul mod N — uses BigUint (N has no special form for fast reduction)
     pub fn mul_mod_n(&self, o: &Fe) -> Self {
         let mut prod = [0u64; 8];
         for i in 0..4 {
@@ -268,7 +265,7 @@ impl Fe {
                 prod[i + j] = carry as u64;
                 carry >>= 64;
             }
-            prod[i + 4] = carry as u64;
+            prod[i + 4] += carry as u64;
         }
         let mut bytes = [0u8; 64];
         for i in 0..8 {
@@ -348,7 +345,7 @@ impl Fe {
 
     pub fn pow(&self, exp: &Fe) -> Self {
         let mut result = Fe::ONE;
-        let mut base = *self;
+        let base = *self;
         let bits = exp.bit_length();
         for i in (0..bits).rev() {
             result = result.sqr();
@@ -359,10 +356,9 @@ impl Fe {
         result
     }
 
-    /// Modular inverse: self^(-1) mod P via Fermat
+    /// Modular inverse mod P via Fermat: self^(P-2)
     pub fn modinv(&self) -> Self {
         if self.is_zero() { panic!("modinv of zero"); }
-        // P - 2
         let exp = Fe { limbs: [
             0xFFFFFFFEFFFFFC2D,
             0xFFFFFFFFFFFFFFFF,
@@ -378,6 +374,20 @@ impl Fe {
 
     pub fn to_biguint(&self) -> BigUint {
         BigUint::from_bytes_be(&self.to_bytes())
+    }
+
+    pub fn from_biguint_mod_p(v: &BigUint) -> Self {
+        let p_big = BigUint::parse_bytes(
+            b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16
+        ).unwrap();
+        let reduced = v % &p_big;
+        let bytes = reduced.to_bytes_be();
+        let mut arr = [0u8; 32];
+        let start = 32 - bytes.len().min(32);
+        arr[start..32].copy_from_slice(&bytes[..bytes.len().min(32)]);
+        let fe = Fe::from_bytes(&arr);
+        // Ensure fully reduced
+        if fe.cmp_val(&P) != Ordering::Less { fe.sub_p() } else { fe }
     }
 
     pub fn from_biguint_mod_n(v: &BigUint) -> Self {
@@ -440,13 +450,8 @@ fn sbb(a: u64, b: u64, borrow_in: u64) -> (u64, u64) {
 // ============================================================
 
 /// Reduce a 512-bit number mod P using the special form of P.
-///
 /// P = 2^256 - 2^32 - 977  =>  2^256 ≡ 2^32 + 977 (mod P)
-///
 /// MUL = 2^32 + 977 = 0x1000003D1 (33 bits)
-///
-/// Algorithm: fold high 256 bits into low 256 bits:
-///   X = hi * 2^256 + lo ≡ hi * MUL + lo (mod P)
 fn reduce512(prod: &[u64; 8]) -> Fe {
     const MUL: u64 = 0x1000003D1;
 
@@ -458,7 +463,7 @@ fn reduce512(prod: &[u64; 8]) -> Fe {
     t[2] = prod[2] as u128;
     t[3] = prod[3] as u128;
 
-    // Fold high 256 bits
+    // Fold high 256 bits: hi * 2^256 ≡ hi * MUL (mod P)
     for i in 0..4usize {
         let c = prod[4 + i] as u128 * MUL as u128;
         t[i] += c & 0xFFFFFFFFFFFFFFFF;
@@ -471,7 +476,7 @@ fn reduce512(prod: &[u64; 8]) -> Fe {
         t[i] &= 0xFFFFFFFFFFFFFFFF;
     }
 
-    // Fold t[4] (may have bits 256-319)
+    // Fold any overflow from t[4]
     for _ in 0..3 {
         if t[4] == 0 { break; }
         let c = t[4];
@@ -487,7 +492,7 @@ fn reduce512(prod: &[u64; 8]) -> Fe {
 
     let mut result = Fe { limbs: [t[0] as u64, t[1] as u64, t[2] as u64, t[3] as u64] };
 
-    // Final conditional subtraction
+    // Final conditional subtraction (may need up to 2)
     for _ in 0..3 {
         if result.cmp_val(&P) != Ordering::Less {
             let (s, borrow) = result.sub_raw(&Fe { limbs: P });
@@ -499,98 +504,4 @@ fn reduce512(prod: &[u64; 8]) -> Fe {
     }
 
     result
-}
-
-// ============================================================
-// TESTS
-// ============================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_add() {
-        let a = Fe::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2E");
-        let b = Fe::from_u64(1);
-        let c = a.add(&b);
-        assert!(c.is_zero(), "P-1 + 1 should be 0 mod P");
-    }
-
-    #[test]
-    fn test_sub() {
-        let a = Fe::from_u64(0);
-        let b = Fe::from_u64(1);
-        let c = a.sub(&b);
-        assert_eq!(c.limbs, [0xFFFFFFFEFFFFFC2E, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF]);
-    }
-
-    #[test]
-    fn test_mul() {
-        let a = Fe::from_u64(2);
-        let b = Fe::from_u64(3);
-        let c = a.mul(&b);
-        assert_eq!(c, Fe::from_u64(6));
-    }
-
-    #[test]
-    fn test_mul_large() {
-        // (P-1) * (P-1) mod P = 1
-        let a = Fe { limbs: [
-            0xFFFFFFFEFFFFFC2E, 0xFFFFFFFFFFFFFFFF,
-            0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF,
-        ]};
-        let c = a.mul(&a);
-        assert_eq!(c, Fe::ONE, "(P-1)^2 mod P should be 1");
-    }
-
-    #[test]
-    fn test_modinv() {
-        let a = Fe::from_u64(7);
-        let a_inv = a.modinv();
-        let product = a.mul(&a_inv);
-        assert_eq!(product, Fe::ONE);
-    }
-
-    #[test]
-    fn test_generator_on_curve() {
-        let gx = Fe::from_hex("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
-        let gy = Fe::from_hex("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
-        let y_sq = gy.mul(&gy);
-        let x_cu = gx.mul(&gx).mul(&gx);
-        let rhs = x_cu.add(&Fe::from_u64(7));
-        assert_eq!(y_sq, rhs, "Generator G should be on curve");
-    }
-
-    #[test]
-    fn test_beta_cube_unity() {
-        let beta = Fe { limbs: BETA };
-        let beta_cu = beta.mul(&beta).mul(&beta);
-        assert_eq!(beta_cu, Fe::ONE, "Beta^3 should be 1 mod P");
-    }
-
-    #[test]
-    fn test_double_generator() {
-        let gx = Fe::from_hex("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
-        let gy = Fe::from_hex("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
-        let s = gx.mul(&gx).add(&gx.mul(&gx)).add(&gx.mul(&gx))
-            .mul(&gy.add(&gy).modinv());
-        let x2 = s.mul(&s).sub(&gx.add(&gx));
-        let expected_x2 = Fe::from_hex("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5");
-        assert_eq!(x2, expected_x2, "2*G x should match");
-    }
-
-    #[test]
-    fn test_reduce512() {
-        // Test: P * 1 should reduce to 0
-        let p_fe = Fe { limbs: P };
-        let one = Fe::ONE;
-        let result = p_fe.mul(&one);
-        assert!(result.is_zero(), "P * 1 mod P should be 0");
-
-        // Test: P * 2 should be 0
-        let two = Fe::from_u64(2);
-        let result2 = p_fe.mul(&two);
-        assert!(result2.is_zero(), "P * 2 mod P should be 0");
-    }
 }

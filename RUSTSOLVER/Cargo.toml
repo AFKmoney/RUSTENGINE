@@ -1,8 +1,8 @@
 [package]
 name = "rustsolver"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
-description = "VORTEX PRIME RUSTSOLVER — Optimized LBE (Lattice Ball Enumeration) for Bitcoin Puzzle P135"
+description = "VORTEX PRIME RUSTSOLVER v2 — Optimized LBE with integer d-LLL for Bitcoin Puzzle P135"
 
 [dependencies]
 rayon = "1.10"
@@ -14,7 +14,6 @@ clap = { version = "4", features = ["derive"] }
 
 [features]
 default = []
-cuda = []
 
 [profile.release]
 opt-level = 3

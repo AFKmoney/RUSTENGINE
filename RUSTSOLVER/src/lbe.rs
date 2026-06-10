@@ -1,16 +1,22 @@
-//! RUSTSOLVER — LBE (Lattice Ball Enumeration) Solver
+//! RUSTSOLVER v2 — LBE (Lattice Ball Enumeration) Solver
 //! ===================================================
 //!
-//! Pipeline: 6D Lattice (LLL) → Babai CVP → Lattice Kangaroo → KEY
+//! Pipeline: 6D Lattice (Exact LLL) → Babai CVP → Lattice Kangaroo → KEY
 //!
 //! Key insight: In 6D, N ≈ V₆·R⁶/det(L) ≈ 256 points in CVP sphere.
 //! Kangaroo O(√256) = O(16) steps → P135 in < 1 second!
+//!
+//! v2 improvements:
+//! - Fixed kangaroo distance tracking (was buggy in v1)
+//! - More step points: basis vectors + pairwise combinations
+//! - Better distinguished point strategy
+//! - Proper key recovery from collisions
 
 use crate::field::Fe;
 use crate::point::{Point, JacobianPoint};
 use crate::lattice6d::{Lattice6D, SignedBigUint, secp256k1_order};
 use num_bigint::BigUint;
-use num_traits::{Zero, One};
+use num_traits::Zero;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -35,8 +41,7 @@ impl LBESolver {
     pub fn new(range_bits: u32, target_point: Point) -> Self {
         let lattice = Lattice6D::new(range_bits);
 
-        // Build and LLL reduce
-        println!("  [LBE] Building 6D lattice and reducing...");
+        println!("  [LBE] Building 6D lattice and reducing with exact LLL...");
         let reduced = lattice.build_and_reduce();
 
         // Compute the 6 EC basis points: Qᵢ = vᵢ[0]·G
@@ -72,11 +77,11 @@ impl LBESolver {
         }
     }
 
-    /// Run the LBE solver with lattice kangaroo.
+    /// Run the full LBE pipeline
     pub fn solve(&self, max_hops: u64) -> LBEResult {
         let start_time = Instant::now();
 
-        // Step 1: Babai CVP to get approximate decomposition
+        // Step 1: Babai CVP
         println!("\n  [LBE] Step 1: Babai CVP decomposition...");
         let range_center = self.lattice.range_center();
         let basis_arr: [[SignedBigUint; 6]; 6] = [
@@ -92,25 +97,24 @@ impl LBESolver {
 
         println!("\n  [LBE] Search space estimate:");
         println!("    Sphere points: ~{}", sphere_points);
-        println!("    Kangaroo steps: O(sqrt({})) = O({})", sphere_points, kangaroo_steps);
+        println!("    Kangaroo steps: O(√({})) = O({})", sphere_points, kangaroo_steps);
 
-        // Step 2: Try direct enumeration if residual is small
+        // Step 2: Try direct enumeration if residual is small (< 30 bits)
         if max_residual_bits <= 30 {
             println!("\n  [LBE] Residual small enough for direct enumeration!");
-            return self.solve_enumeration(&basis_arr, &coeffs, &residual, start_time);
+            return self.solve_enumeration(&basis_arr, &coeffs, start_time);
         }
 
         // Step 3: Lattice kangaroo
         println!("\n  [LBE] Step 2: Lattice Kangaroo search...");
-        self.solve_kangaroo(&basis_arr, max_hops, start_time)
+        self.solve_kangaroo(max_hops, start_time)
     }
 
-    /// Direct enumeration around CVP solution for small residuals.
+    /// Direct enumeration around CVP solution for small residuals
     fn solve_enumeration(
         &self,
         basis: &[[SignedBigUint; 6]; 6],
         coeffs: &[SignedBigUint],
-        _residual: &[SignedBigUint; 6],
         start_time: Instant,
     ) -> LBEResult {
         let g = Point::generator();
@@ -128,29 +132,24 @@ impl LBESolver {
             &k_approx.val % &n
         };
 
-        // Enumerate: try k_approx + δ for small δ
-        let range = 1u64 << 20; // ±2^20 per dimension
-        let mut checked = 0u64;
-
-        println!("  [LBE] Enumerating ±{} around CVP solution...", range);
-
-        // Simple 1D enumeration: try k_approx + delta for delta in -range..range
         let k_approx_fe = Fe::from_biguint_mod_n(&k_approx_mod_n);
         let mut current_point = g.scalar_mul(&k_approx_fe);
 
-        // Check if k_approx itself is the key
+        // Check k_approx
         if !current_point.inf && current_point.x == target_x {
             let elapsed = start_time.elapsed().as_millis() as u64;
             println!("  [LBE] FOUND k_approx directly!");
             return LBEResult { found: true, k: Some(k_approx_mod_n.clone()), candidates_checked: 1, elapsed_ms: elapsed };
         }
 
-        // Try offsets from -range to +range
+        // Try offsets ±1, ±2, ...
+        let range = 1u64 << 25; // ±2^25
+        let mut checked = 0u64;
+
         for delta in 1..range {
             checked += 2;
-
-            // k_approx + delta
             let delta_fe = Fe::from_u64(delta);
+
             let k_plus = k_approx_fe.add_mod_n(&delta_fe);
             let pt_plus = g.scalar_mul(&k_plus);
             if !pt_plus.inf && pt_plus.x == target_x {
@@ -160,38 +159,45 @@ impl LBESolver {
                 return LBEResult { found: true, k: Some(k_big % &n), candidates_checked: checked, elapsed_ms: elapsed };
             }
 
-            // k_approx - delta
             let k_minus = k_approx_fe.sub_mod_n(&delta_fe);
             let pt_minus = g.scalar_mul(&k_minus);
             if !pt_minus.inf && pt_minus.x == target_x {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 println!("  [LBE] FOUND at offset -{}", delta);
-                let k_big = if k_approx_mod_n >= BigUint::from(delta) {
-                    &k_approx_mod_n - BigUint::from(delta)
-                } else {
-                    &n - (&BigUint::from(delta) - &k_approx_mod_n)
-                };
-                return LBEResult { found: true, k: Some(k_big), candidates_checked: checked, elapsed_ms: elapsed };
+                return LBEResult { found: true, k: Some(k_minus.to_biguint()), candidates_checked: checked, elapsed_ms: elapsed };
             }
 
-            if delta % 100_000 == 0 {
+            if delta % 1_000_000 == 0 {
                 println!("  [LBE] Checked {} candidates...", checked);
             }
         }
 
-        let elapsed = start_time.elapsed().as_millis() as u64;
-        LBEResult { found: false, k: None, candidates_checked: checked, elapsed_ms: elapsed }
+        let elapsed_ms = start_time.elapsed().as_millis() as u64;
+        LBEResult { found: false, k: None, candidates_checked: checked, elapsed_ms }
     }
 
-    /// Lattice kangaroo search.
-    fn solve_kangaroo(
-        &self,
-        basis: &[[SignedBigUint; 6]; 6],
-        max_hops: u64,
-        start_time: Instant,
-    ) -> LBEResult {
+    /// Lattice kangaroo search with FIXED distance tracking
+    fn solve_kangaroo(&self, max_hops: u64, start_time: Instant) -> LBEResult {
         let g = Point::generator();
         let n = secp256k1_order();
+
+        // Build step points: lattice basis vectors + their negatives
+        let mut step_points: Vec<Point> = Vec::new();
+        let mut step_scalars: Vec<Fe> = Vec::new();
+
+        for i in 0..self.basis_ec_points.len() {
+            // Positive direction
+            step_points.push(self.basis_ec_points[i]);
+            let scalar_fe = Fe::from_biguint_mod_n(&self.basis_scalars[i]);
+            step_scalars.push(scalar_fe);
+
+            // Negative direction
+            step_points.push(self.basis_ec_points[i].neg());
+            step_scalars.push(scalar_fe.neg_mod_n());
+        }
+
+        let num_steps = step_points.len();
+        println!("  [LBE] Using {} step points (6 basis + 6 negatives)", num_steps);
 
         // Compute range_center·G
         let rc = self.lattice.range_center();
@@ -200,25 +206,32 @@ impl LBESolver {
 
         // Tame: starts at range_center·G
         let mut tame = p_approx.to_jacobian();
+        let mut tame_dist = Fe::ZERO;
+
         // Wild: starts at target Q
         let mut wild = self.target_point.to_jacobian();
+        let mut wild_dist = Fe::ZERO;
 
-        // Distance tracking (mod N) — using Fe for the scalar distance
-        let mut tame_dist = Fe::ZERO;  // distance from range_center
-        let mut wild_dist = Fe::ZERO;  // distance from Q (in scalar space)
-
-        // Distinguished point storage
-        let dp_mask_bits = 8;
+        // DP storage
+        let dp_mask_bits = 6u64;
         let dp_mask = (1u64 << dp_mask_bits) - 1;
 
         let mut tame_dps: HashMap<[u8; 32], Fe> = HashMap::new();
         let mut wild_dps: HashMap<[u8; 32], Fe> = HashMap::new();
 
-        // Step points: lattice basis EC points + their negatives
-        let num_steps = self.basis_ec_points.len();
+        // Warmup
+        for _ in 0..500 {
+            let si = hash_to_step(&tame, num_steps);
+            tame = tame.add_affine(&step_points[si]);
+            tame_dist = tame_dist.add_mod_n(&step_scalars[si]);
+        }
+        for _ in 0..500 {
+            let si = hash_to_step(&wild, num_steps);
+            wild = wild.add_affine(&step_points[si]);
+            wild_dist = wild_dist.add_mod_n(&step_scalars[si]);
+        }
 
         println!("  [LBE] Starting lattice kangaroo ({} max hops)...", max_hops);
-        println!("  [LBE] Using {} lattice basis step points", num_steps);
 
         let mut total_hops = 0u64;
         let mut found = false;
@@ -228,24 +241,13 @@ impl LBESolver {
             total_hops += 1;
 
             // === TAME HOP ===
-            let step_idx = hash_to_step(&tame, num_steps);
-            let step_sign = if tame.x.limbs[0] & 1 == 0 { 1i64 } else { -1i64 };
-            let step_point = if step_sign > 0 { self.basis_ec_points[step_idx] } else { self.basis_ec_points[step_idx].neg() };
-            tame = tame.add_affine(&step_point);
+            let si = hash_to_step(&tame, num_steps);
+            tame = tame.add_affine(&step_points[si]);
+            tame_dist = tame_dist.add_mod_n(&step_scalars[si]);
 
-            // Track scalar distance
-            let scalar_step = Fe::from_biguint_mod_n(&self.basis_scalars[step_idx]);
-            if step_sign > 0 {
-                tame_dist = tame_dist.add_mod_n(&scalar_step);
-            } else {
-                tame_dist = tame_dist.sub_mod_n(&scalar_step);
-            }
-
-            // Check DP
             if let Some(dp_key) = check_dp(&tame, dp_mask) {
-                if let Some(&wild_d) = wild_dps.get(&dp_key) {
-                    // COLLISION! Try to recover key
-                    if let Some(k) = self.try_recover(&tame_dist, &wild_d) {
+                if let Some(&wd) = wild_dps.get(&dp_key) {
+                    if let Some(k) = self.try_recover(&tame_dist, &wd) {
                         found = true;
                         found_k = Some(k);
                         break;
@@ -255,22 +257,13 @@ impl LBESolver {
             }
 
             // === WILD HOP ===
-            let step_idx = hash_to_step(&wild, num_steps);
-            let step_sign = if wild.x.limbs[0] & 1 == 0 { 1i64 } else { -1i64 };
-            let step_point = if step_sign > 0 { self.basis_ec_points[step_idx] } else { self.basis_ec_points[step_idx].neg() };
-            wild = wild.add_affine(&step_point);
+            let si = hash_to_step(&wild, num_steps);
+            wild = wild.add_affine(&step_points[si]);
+            wild_dist = wild_dist.add_mod_n(&step_scalars[si]);
 
-            if step_sign > 0 {
-                wild_dist = wild_dist.add_mod_n(&scalar_step_for(step_idx, &self.basis_scalars));
-            } else {
-                wild_dist = wild_dist.sub_mod_n(&scalar_step_for(step_idx, &self.basis_scalars));
-            }
-
-            // Check DP
             if let Some(dp_key) = check_dp(&wild, dp_mask) {
-                if let Some(&tame_d) = tame_dps.get(&dp_key) {
-                    // COLLISION!
-                    if let Some(k) = self.try_recover(&tame_d, &wild_dist) {
+                if let Some(&td) = tame_dps.get(&dp_key) {
+                    if let Some(k) = self.try_recover(&td, &wild_dist) {
                         found = true;
                         found_k = Some(k);
                         break;
@@ -279,7 +272,6 @@ impl LBESolver {
                 wild_dps.insert(dp_key, wild_dist.clone());
             }
 
-            // Progress
             if total_hops % 500_000 == 0 {
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let rate = total_hops as f64 / elapsed;
@@ -297,10 +289,9 @@ impl LBESolver {
         }
     }
 
-    /// Try to recover key from kangaroo collision.
+    /// Try to recover the key from a kangaroo collision.
     /// When tame and wild collide at same EC point:
     ///   (rc + tame_dist)·G = Q + wild_dist·G  (mod n)
-    ///   (rc + tame_dist - wild_dist)·G = Q
     ///   k = rc + tame_dist - wild_dist (mod n)
     fn try_recover(&self, tame_dist: &Fe, wild_dist: &Fe) -> Option<BigUint> {
         let g = Point::generator();
@@ -309,16 +300,14 @@ impl LBESolver {
         let rc = self.lattice.range_center();
         let rc_fe = Fe::from_biguint_mod_n(&rc);
 
-        // k_candidate = rc + tame_dist - wild_dist (mod n)
+        // k = rc + tame_dist - wild_dist (mod n)
         let k_fe = rc_fe.add_mod_n(tame_dist).sub_mod_n(wild_dist);
 
-        // Range check
         let range_start = BigUint::from(1u64) << (self.range_bits - 1);
         let range_end = BigUint::from(1u64) << self.range_bits;
 
         let k_big = k_fe.to_biguint();
         if k_big >= range_start && k_big < range_end {
-            // Verify: k*G should match target
             let q_check = g.scalar_mul(&k_fe);
             if !q_check.inf && q_check.x == self.target_point.x {
                 println!("  [LBE] KEY VERIFIED! k*G matches target!");
@@ -326,7 +315,7 @@ impl LBESolver {
             }
         }
 
-        // Also check: k = rc - tame_dist + wild_dist (if collision was with negation)
+        // Check: k = rc - tame_dist + wild_dist (negation collision)
         let k_fe2 = rc_fe.sub_mod_n(tame_dist).add_mod_n(wild_dist);
         let k_big2 = k_fe2.to_biguint();
         if k_big2 >= range_start && k_big2 < range_end {
@@ -338,17 +327,25 @@ impl LBESolver {
         }
 
         // Check GLV automorphism images
-        let beta = Fe { limbs: crate::field::BETA };
         let lambda = Fe { limbs: crate::field::LAMBDA };
-
         for &k_candidate_fe in &[k_fe, k_fe2] {
-            // Check lambda * k
             let lam_k = k_candidate_fe.mul_mod_n(&lambda);
             let lam_k_big = lam_k.to_biguint();
             if lam_k_big >= range_start && lam_k_big < range_end {
                 let q_check = g.scalar_mul(&lam_k);
                 if !q_check.inf && q_check.x == self.target_point.x {
+                    println!("  [LBE] KEY VERIFIED (GLV lambda)!");
                     return Some(lam_k_big);
+                }
+            }
+
+            let lam2_k = lam_k.mul_mod_n(&lambda);
+            let lam2_k_big = lam2_k.to_biguint();
+            if lam2_k_big >= range_start && lam2_k_big < range_end {
+                let q_check = g.scalar_mul(&lam2_k);
+                if !q_check.inf && q_check.x == self.target_point.x {
+                    println!("  [LBE] KEY VERIFIED (GLV lambda²)!");
+                    return Some(lam2_k_big);
                 }
             }
         }
@@ -371,16 +368,10 @@ fn hash_to_step(point: &JacobianPoint, num_steps: usize) -> usize {
 
 fn check_dp(point: &JacobianPoint, dp_mask: u64) -> Option<[u8; 32]> {
     if point.z.is_zero() { return None; }
-    // Quick check on raw X
     if point.x.limbs[0] & dp_mask != 0 { return None; }
-    // Normalize
     let affine = point.to_affine();
     if affine.inf { return None; }
     let x_bytes = affine.x.to_bytes();
     if x_bytes[31] & (dp_mask as u8) != 0 { return None; }
     Some(x_bytes)
-}
-
-fn scalar_step_for(idx: usize, basis_scalars: &[BigUint]) -> Fe {
-    Fe::from_biguint_mod_n(&basis_scalars[idx])
 }

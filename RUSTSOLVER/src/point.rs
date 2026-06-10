@@ -1,5 +1,5 @@
-//! RUSTSOLVER — secp256k1 EC Point with Jacobian Coordinates
-//! ============================================================
+//! RUSTSOLVER v2 — secp256k1 EC Point with Jacobian Coordinates
+//! =============================================================
 
 use crate::field::Fe;
 
@@ -112,16 +112,17 @@ impl JacobianPoint {
     pub fn double(&self) -> Self {
         if self.z.is_zero() || self.y.is_zero() { return Self::infinity(); }
 
-        let a = self.y.sqr();
-        let b = self.x.mul(&a);
+        let a = self.y.sqr();             // Y^2
+        let b = self.x.mul(&a);           // X*Y^2
         let b4 = b.add(&b).add(&b).add(&b); // 4*X*Y^2
         let d = self.x.sqr().add(&self.x.sqr()).add(&self.x.sqr()); // 3*X^2 (a=0)
-        let c = a.sqr();
-        let c8 = c.add(&c).add(&c).add(&c).add(&c).add(&c).add(&c).add(&c); // 8*Y^4
+        let c = a.sqr();                  // Y^4
+        let c8 = c.add(&c).add(&c).add(&c)
+                  .add(&c).add(&c).add(&c).add(&c); // 8*Y^4
 
-        let x3 = d.sqr().sub(&b4).sub(&b4);
-        let y3 = d.mul(&b4.sub(&x3)).sub(&c8);
-        let z3 = self.y.add(&self.y).mul(&self.z);
+        let x3 = d.sqr().sub(&b4).sub(&b4);  // D^2 - 2*B
+        let y3 = d.mul(&b4.sub(&x3)).sub(&c8); // D*(B - X3) - 8*Y^4
+        let z3 = self.y.add(&self.y).mul(&self.z); // 2*Y*Z
 
         JacobianPoint { x: x3, y: y3, z: z3 }
     }
@@ -134,19 +135,19 @@ impl JacobianPoint {
         if other.inf { return *self; }
 
         let z1_sq = self.z.sqr();
-        let u2 = other.x.mul(&z1_sq);
+        let u2 = other.x.mul(&z1_sq);     // x2 * Z1^2
         let z1_cu = z1_sq.mul(&self.z);
-        let s2 = other.y.mul(&z1_cu);
+        let s2 = other.y.mul(&z1_cu);      // y2 * Z1^3
 
         if self.x == u2 {
             if self.y == s2 { return self.double(); }
             return Self::infinity();
         }
 
-        let h = u2.sub(&self.x);
-        let r = s2.sub(&self.y);
-        let h_sq = h.sqr();
-        let h_cu = h_sq.mul(&h);
+        let h = u2.sub(&self.x);           // H = U2 - X1
+        let r = s2.sub(&self.y);           // R = S2 - Y1
+        let h_sq = h.sqr();                // H^2
+        let h_cu = h_sq.mul(&h);           // H^3
 
         let x3 = r.sqr().sub(&h_cu).sub(&self.x.add(&self.x).mul(&h_sq));
         let y3 = r.mul(&self.x.mul(&h_sq).sub(&x3)).sub(&self.y.mul(&h_cu));
