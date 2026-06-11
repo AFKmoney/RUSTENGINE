@@ -199,48 +199,39 @@ impl LBESolver {
         LBEResult { found: false, k: None, candidates_checked: checked, oracle_filtered, elapsed_ms }
     }
 
-    /// Lattice kangaroo search with FIXED distance tracking
+    /// Pollard kangaroo search with CORRECT step sizes + GLV + Oracle
+    ///
+    /// Key fix: step sizes must be ~√S/4 where S = 2^range_bits
+    /// For P135: steps ~2^65, for P70: steps ~2^33
+    /// Lattice basis vectors (2^41-2^45) are TOO SMALL for P135!
     fn solve_kangaroo(&self, max_hops: u64, start_time: Instant) -> LBEResult {
         let g = Point::generator();
 
-        // Build step points: lattice basis vectors + their negatives
-        let mut step_points: Vec<Point> = Vec::new();
-        let mut step_scalars: Vec<Fe> = Vec::new();
+        // *** CRITICAL FIX: Step sizes must match the search range ***
+        // Mean step ≈ √(2^range_bits) / 4 = 2^(range_bits/2 - 2)
+        let mean_exp = self.range_bits as u64 / 2 - 2;
+        let low = mean_exp.saturating_sub(4);
+        let high = mean_exp + 4;
+        let n_steps = (high - low + 1) as usize;
 
-        for i in 0..self.basis_ec_points.len() {
-            // Positive direction
-            step_points.push(self.basis_ec_points[i]);
-            let scalar_fe = Fe::from_biguint_mod_n(&self.basis_scalars[i]);
+        println!("  [KANG] Step sizes: 2^{}..2^{} ({} steps, mean ≈ 2^{})", low, high, n_steps, mean_exp);
+
+        // Precompute step points: 2^j * G for j in [low, high]
+        let mut step_points: Vec<Point> = Vec::with_capacity(n_steps);
+        let mut step_scalars: Vec<Fe> = Vec::with_capacity(n_steps);
+
+        println!("  [KANG] Precomputing {} step points...", n_steps);
+        for j in low..=high {
+            // scalar = 2^j
+            let scalar_big = BigUint::from(1u64) << j as usize;
+            let scalar_fe = Fe::from_biguint_mod_n(&scalar_big);
+            let pt = g.scalar_mul(&scalar_fe);
+            step_points.push(pt);
             step_scalars.push(scalar_fe);
-
-            // Negative direction
-            step_points.push(self.basis_ec_points[i].neg());
-            step_scalars.push(scalar_fe.neg_mod_n());
-        }
-
-        // Also add pairwise combinations for denser coverage
-        // Q_i + Q_j and Q_i - Q_j for i < j
-        let basis_len = self.basis_ec_points.len();
-        for i in 0..basis_len {
-            for j in (i+1)..basis_len.min(3) { // Only first 3 to keep step count manageable
-                // Q_i + Q_j
-                let sum_pt = self.basis_ec_points[i].add(&self.basis_ec_points[j]);
-                let sum_scalar = Fe::from_biguint_mod_n(&self.basis_scalars[i])
-                    .add_mod_n(&Fe::from_biguint_mod_n(&self.basis_scalars[j]));
-                step_points.push(sum_pt);
-                step_scalars.push(sum_scalar);
-
-                // Q_i - Q_j
-                let diff_pt = self.basis_ec_points[i].add(&self.basis_ec_points[j].neg());
-                let diff_scalar = Fe::from_biguint_mod_n(&self.basis_scalars[i])
-                    .sub_mod_n(&Fe::from_biguint_mod_n(&self.basis_scalars[j]));
-                step_points.push(diff_pt);
-                step_scalars.push(diff_scalar);
-            }
         }
 
         let num_steps = step_points.len();
-        println!("  [LBE] Using {} step points (basis + negatives + pairwise)", num_steps);
+        println!("  [KANG] Using {} step points (powers of 2 * G)", num_steps);
 
         // Compute range_center·G
         let rc = self.lattice.range_center();
@@ -256,8 +247,10 @@ impl LBESolver {
         let mut wild_dist = Fe::ZERO;
 
         // DP storage with Fe distance tracking
-        let dp_mask_bits = 8u64; // 8-bit DP = 1/256 chance
+        // DP bits: use range_bits/4 for optimal collision rate
+        let dp_mask_bits = std::cmp::max(4, std::cmp::min(20, self.range_bits as u64 / 4));
         let dp_mask = (1u64 << dp_mask_bits) - 1;
+        println!("  [KANG] DP bits: {} (1/{} chance)", dp_mask_bits, 1u64 << dp_mask_bits);
 
         let mut tame_dps: HashMap<[u8; 32], Fe> = HashMap::new();
         let mut wild_dps: HashMap<[u8; 32], Fe> = HashMap::new();
@@ -275,11 +268,12 @@ impl LBESolver {
             wild_dist = wild_dist.add_mod_n(&step_scalars[si]);
         }
 
-        println!("  [LBE] Starting lattice kangaroo ({} max hops, {}-bit DP)...", max_hops, dp_mask_bits);
+        println!("  [KANG] Starting Pollard kangaroo ({} max hops, {}-bit DP)...", max_hops, dp_mask_bits);
+        println!("  [KANG] Expected complexity: O(2^{}) hops for P{}", self.range_bits / 2, self.range_bits);
         if self.oracle.is_some() {
-            println!("  [LBE] Oracle: x-coordinate pre-filter ACTIVE");
+            println!("  [KANG] Oracle: x-coordinate pre-filter ACTIVE (208x)");
         }
-        println!("  [LBE] GLV: 6x automorphism check on collision");
+        println!("  [KANG] GLV: 6x automorphism check on collision");
 
         let mut total_hops = 0u64;
         let mut found = false;
@@ -324,7 +318,7 @@ impl LBESolver {
             if total_hops % 500_000 == 0 {
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let rate = total_hops as f64 / elapsed;
-                println!("  [LBE] Hops: {} | Rate: {:.0}/s | DPs: {}+{} | Oracle filtered: {}",
+                println!("  [KANG] Hops: {} | Rate: {:.0}/s | DPs: {}+{} | Oracle filtered: {}",
                          total_hops, rate, tame_dps.len(), wild_dps.len(), oracle_filtered);
             }
         }
