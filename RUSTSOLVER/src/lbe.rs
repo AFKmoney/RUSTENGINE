@@ -16,7 +16,7 @@
 //!   Oracle x-check FIRST (cheap) → then scalar_mul verify (expensive)
 
 use crate::field::Fe;
-use crate::point::{Point, JacobianPoint};
+use crate::point::Point;
 use crate::lattice6d::{Lattice6D, SignedBigUint, secp256k1_order};
 use crate::oracle::Round0Oracle;
 use num_bigint::BigUint;
@@ -204,14 +204,18 @@ impl LBESolver {
 
     /// Pollard kangaroo search with CORRECT step sizes + GLV + Oracle
     ///
-    /// Key fix: step sizes must be ~√S/4 where S = 2^range_bits
-    /// For P135: steps ~2^65, for P70: steps ~2^33
-    /// Lattice basis vectors (2^41-2^45) are TOO SMALL for P135!
+    /// v3.2 FIX: Proper Pollard kangaroo with deterministic affine stepping.
+    ///
+    /// Standard Pollard kangaroo algorithm:
+    /// 1. Tame kangaroo starts at rc*G, walks N steps, records all DPs
+    /// 2. Wild kangaroo starts at Q=k*G, walks until it hits a tame DP
+    /// 3. On DP collision: k = rc + tame_dist - wild_dist (mod N)
+    ///
+    /// Both kangaroos use AFFINE coordinates for deterministic hash + DP.
     fn solve_kangaroo(&self, max_hops: u64, start_time: Instant) -> LBEResult {
         let g = Point::generator();
 
-        // *** CRITICAL FIX: Step sizes must match the search range ***
-        // Mean step ≈ √(2^range_bits) / 4 = 2^(range_bits/2 - 2)
+        // Step sizes: mean ≈ √(2^range_bits) / 4
         let mean_exp = self.range_bits as u64 / 2 - 2;
         let low = mean_exp.saturating_sub(4);
         let high = mean_exp + 4;
@@ -225,7 +229,6 @@ impl LBESolver {
 
         println!("  [KANG] Precomputing {} step points...", n_steps);
         for j in low..=high {
-            // scalar = 2^j
             let scalar_big = BigUint::from(1u64) << j as usize;
             let scalar_fe = Fe::from_biguint_mod_n(&scalar_big);
             let pt = g.scalar_mul(&scalar_fe);
@@ -241,88 +244,81 @@ impl LBESolver {
         let rc_fe = Fe::from_biguint_mod_n(&rc);
         let p_approx = g.scalar_mul(&rc_fe);
 
-        // Tame: starts at range_center·G
-        let mut tame = p_approx.to_jacobian();
-        let mut tame_dist = Fe::ZERO;
-
-        // Wild: starts at target Q
-        let mut wild = self.target_point.to_jacobian();
-        let mut wild_dist = Fe::ZERO;
-
-        // DP storage with Fe distance tracking
-        // DP bits: use range_bits/4 for optimal collision rate
-        let dp_mask_bits = std::cmp::max(4, std::cmp::min(20, self.range_bits as u64 / 4));
+        // DP storage
+        // Use FEWER DP bits = MORE DPs = higher collision chance
+        // For kangaroo to work, we need enough DPs that wild will hit one
+        let dp_mask_bits = std::cmp::max(2, std::cmp::min(10, self.range_bits as u64 / 8));
         let dp_mask = (1u64 << dp_mask_bits) - 1;
         println!("  [KANG] DP bits: {} (1/{} chance)", dp_mask_bits, 1u64 << dp_mask_bits);
 
+        // ============================================================
+        // PHASE 1: Tame kangaroo — walk and record all DPs
+        // ============================================================
+        // The tame walks for ~4*√(2^range_bits) steps, covering the
+        // whole range, and records all DPs. Then the wild searches.
+        let expected_walk = (1u64 << (self.range_bits / 2)) * 4;
+        let tame_max = std::cmp::min(expected_walk, max_hops);
+
+        println!("\n  [KANG] Phase 1: Tame kangaroo ({} steps)...", tame_max);
         let mut tame_dps: HashMap<[u8; 32], Fe> = HashMap::new();
-        let mut wild_dps: HashMap<[u8; 32], Fe> = HashMap::new();
+        let mut tame_aff = p_approx;
+        let mut tame_dist = Fe::ZERO;
 
-        // Warmup: randomize starting positions a bit
-        println!("  [LBE] Warming up kangaroos...");
-        for _ in 0..200 {
-            let si = hash_to_step(&tame, num_steps);
-            tame = tame.add_affine(&step_points[si]);
+        for hop in 0..tame_max {
+            let si = hash_to_step_affine(&tame_aff, num_steps);
+            let new_jac = tame_aff.to_jacobian().add_affine(&step_points[si]);
+            tame_aff = new_jac.to_affine();
             tame_dist = tame_dist.add_mod_n(&step_scalars[si]);
-        }
-        for _ in 0..200 {
-            let si = hash_to_step(&wild, num_steps);
-            wild = wild.add_affine(&step_points[si]);
-            wild_dist = wild_dist.add_mod_n(&step_scalars[si]);
+
+            if let Some(dp_key) = check_dp_affine(&tame_aff, dp_mask) {
+                tame_dps.entry(dp_key).or_insert(tame_dist.clone());
+            }
+
+            if hop > 0 && hop % 500_000 == 0 {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                println!("    Tame: {} steps | {} DPs | {:.0}/s", hop, tame_dps.len(), hop as f64 / elapsed);
+            }
         }
 
-        println!("  [KANG] Starting Pollard kangaroo ({} max hops, {}-bit DP)...", max_hops, dp_mask_bits);
-        println!("  [KANG] Expected complexity: O(2^{}) hops for P{}", self.range_bits / 2, self.range_bits);
-        if self.oracle.is_some() {
-            println!("  [KANG] Oracle: x-coordinate pre-filter ACTIVE (208x)");
-        }
-        println!("  [KANG] GLV: 6x automorphism check on collision");
+        let tame_elapsed = start_time.elapsed().as_secs_f64();
+        println!("  [KANG] Tame done: {} steps, {} DPs ({:.2}s)", tame_max, tame_dps.len(), tame_elapsed);
 
-        let mut total_hops = 0u64;
+        // ============================================================
+        // PHASE 2: Wild kangaroo — walk until DP collision
+        // ============================================================
+        let wild_max = max_hops.saturating_sub(tame_max);
+        println!("\n  [KANG] Phase 2: Wild kangaroo ({} steps max)...", wild_max);
+
+        let mut wild_aff = self.target_point;
+        let mut wild_dist = Fe::ZERO;
+        let mut total_hops = tame_max;
         let mut found = false;
         let mut found_k: Option<BigUint> = None;
         let mut oracle_filtered = 0u64;
 
-        while total_hops < max_hops && !found {
+        for hop in 0..wild_max {
             total_hops += 1;
 
-            // === TAME HOP ===
-            let si = hash_to_step(&tame, num_steps);
-            tame = tame.add_affine(&step_points[si]);
-            tame_dist = tame_dist.add_mod_n(&step_scalars[si]);
-
-            if let Some(dp_key) = check_dp(&tame, dp_mask) {
-                if let Some(&wd) = wild_dps.get(&dp_key) {
-                    if let Some(k) = self.try_recover(&tame_dist, &wd, &mut oracle_filtered) {
-                        found = true;
-                        found_k = Some(k);
-                        break;
-                    }
-                }
-                tame_dps.insert(dp_key, tame_dist.clone());
-            }
-
-            // === WILD HOP ===
-            let si = hash_to_step(&wild, num_steps);
-            wild = wild.add_affine(&step_points[si]);
+            let si = hash_to_step_affine(&wild_aff, num_steps);
+            let new_jac = wild_aff.to_jacobian().add_affine(&step_points[si]);
+            wild_aff = new_jac.to_affine();
             wild_dist = wild_dist.add_mod_n(&step_scalars[si]);
 
-            if let Some(dp_key) = check_dp(&wild, dp_mask) {
+            if let Some(dp_key) = check_dp_affine(&wild_aff, dp_mask) {
                 if let Some(&td) = tame_dps.get(&dp_key) {
+                    println!("  [KANG] DP COLLISION at wild hop {}!", hop);
                     if let Some(k) = self.try_recover(&td, &wild_dist, &mut oracle_filtered) {
                         found = true;
                         found_k = Some(k);
                         break;
                     }
                 }
-                wild_dps.insert(dp_key, wild_dist.clone());
             }
 
-            if total_hops % 500_000 == 0 {
+            if hop > 0 && hop % 500_000 == 0 {
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let rate = total_hops as f64 / elapsed;
-                println!("  [KANG] Hops: {} | Rate: {:.0}/s | DPs: {}+{} | Oracle filtered: {}",
-                         total_hops, rate, tame_dps.len(), wild_dps.len(), oracle_filtered);
+                println!("    Wild: {} steps | DPs checked vs tame | Rate: {:.0}/s", hop, rate);
             }
         }
 
@@ -331,6 +327,7 @@ impl LBESolver {
         if found {
             LBEResult { found: true, k: found_k, candidates_checked: total_hops, oracle_filtered, elapsed_ms }
         } else {
+            println!("  [KANG] Wild exhausted {} steps without collision", wild_max);
             LBEResult { found: false, k: None, candidates_checked: total_hops, oracle_filtered, elapsed_ms }
         }
     }
@@ -432,28 +429,24 @@ impl LBESolver {
 }
 
 // ============================================================
-// HELPERS
+// HELPERS — AFFINE-based for deterministic kangaroo
 // ============================================================
 
-fn hash_to_step(point: &JacobianPoint, num_steps: usize) -> usize {
-    if point.z.is_zero() { return 0; }
+/// Hash affine point to step index — DETERMINISTIC (same point → same step)
+fn hash_to_step_affine(point: &Point, num_steps: usize) -> usize {
+    if point.inf { return 0; }
     let x0 = point.x.limbs[0];
     let x1 = point.x.limbs[1];
-    let x2 = point.x.limbs[2];
     let num = num_steps.max(1);
-    // Use more bits for better distribution
     ((x0 as usize).wrapping_mul(0x517cc1b727220a95))
         .wrapping_add((x1 as usize).wrapping_mul(0x2b592653855b1e8d))
-        .wrapping_add((x2 as usize).wrapping_mul(0x1b73a3e8a5c0c9d3))
         % num
 }
 
-fn check_dp(point: &JacobianPoint, dp_mask: u64) -> Option<[u8; 32]> {
-    if point.z.is_zero() { return None; }
-    // Check low bits of x coordinate for DP pattern
+/// Check if affine point is a distinguished point — DETERMINISTIC
+fn check_dp_affine(point: &Point, dp_mask: u64) -> Option<[u8; 32]> {
+    if point.inf { return None; }
+    // Check low bits of AFFINE x for DP pattern
     if point.x.limbs[0] & dp_mask != 0 { return None; }
-    // Convert to affine for the DP key
-    let affine = point.to_affine();
-    if affine.inf { return None; }
-    Some(affine.x.to_bytes())
+    Some(point.x.to_bytes())
 }
