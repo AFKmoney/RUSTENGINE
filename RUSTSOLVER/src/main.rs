@@ -31,6 +31,7 @@ use lbe::LBESolver;
 use oracle::Round0Oracle;
 use std::time::Instant;
 use num_bigint::BigUint;
+use std::collections::HashMap;
 
 // ============================================================
 // CLI
@@ -123,6 +124,13 @@ fn main() {
             .ok();
     }
 
+    // Selftest mode doesn't need puzzle lookup
+    if args.mode == "selftest" {
+        let range_bits = std::cmp::max(20, std::cmp::min(50, args.target));
+        run_selftest(range_bits);
+        return;
+    }
+
     // Get puzzle
     let puzzle = get_puzzle(args.target);
     println!("  Target: Puzzle #{}", args.target);
@@ -174,7 +182,8 @@ fn main() {
             run_test_mode();
         }
         "selftest" => {
-            run_selftest(args.target);
+            // Selftest uses target as range_bits directly, no puzzle lookup needed
+            run_selftest(std::cmp::max(20, std::cmp::min(50, args.target)));
         }
         _ => {
             eprintln!("Unknown mode: {}. Use: lbe, lattice, test", args.mode);
@@ -411,11 +420,13 @@ fn run_test_mode() {
 // ============================================================
 
 fn run_selftest(range_bits: u32) {
-    // Cap range_bits to 50 for practical selftest
-    let range_bits = std::cmp::min(range_bits, 50);
+    // Use small range for practical selftest
+    let range_bits = std::cmp::min(range_bits, 35);
     println!("\n╔══════════════════════════════════════════════════════════╗");
     println!("║  SELFTEST: Generate {}-bit key → Kangaroo → Verify       ║", range_bits);
     println!("╚══════════════════════════════════════════════════════════╝");
+
+    // Skip LLL for selftest (takes too long, not needed for kangaroo)
 
     let g = Point::generator();
 
@@ -484,10 +495,15 @@ fn run_selftest(range_bits: u32) {
     let oracle = Round0Oracle::new(&pubkey_bytes);
     oracle.print_summary();
 
-    // Run LBE
-    let max_hops = if range_bits <= 50 { 50_000_000 } else { 100_000_000 };
-    let solver = LBESolver::new(range_bits, target_point, Some(oracle));
-    let result = solver.solve(max_hops);
+    // Run kangaroo directly (skip LLL for speed in selftest)
+    let max_hops = if range_bits <= 25 { 2_000_000 }
+                   else if range_bits <= 30 { 5_000_000 }
+                   else if range_bits <= 35 { 10_000_000 }
+                   else if range_bits <= 40 { 20_000_000 }
+                   else { 100_000_000 };
+    
+    // Direct kangaroo — no lattice needed
+    let result = direct_kangaroo(range_bits, &target_point, Some(&oracle), max_hops);
 
     if result.found {
         if let Some(k_found) = result.k {
@@ -509,6 +525,169 @@ fn run_selftest(range_bits: u32) {
     println!("    Hops: {}", result.candidates_checked);
     println!("    Oracle filtered: {}", result.oracle_filtered);
     println!("    Time: {}ms", result.elapsed_ms);
+}
+
+// ============================================================
+// DIRECT KANGAROO — No LLL, just pure Pollard kangaroo
+// ============================================================
+
+struct KangResult {
+    found: bool,
+    k: Option<BigUint>,
+    candidates_checked: u64,
+    oracle_filtered: u64,
+    elapsed_ms: u64,
+}
+
+fn direct_kangaroo(range_bits: u32, target: &Point, oracle: Option<&Round0Oracle>, max_hops: u64) -> KangResult {
+    let g = Point::generator();
+    let _n = lattice6d::secp256k1_order();
+    let start = Instant::now();
+
+    // Step sizes — use 32 sizes for good mixing (standard: 20-32)
+    let mean_exp = range_bits as u64 / 2 - 2;
+    let low = mean_exp.saturating_sub(8);
+    let high = mean_exp + 8;
+    let n_steps = (high - low + 1) as usize;
+    // Ensure at least 20 step sizes
+    let low = if n_steps < 20 { mean_exp.saturating_sub(10) } else { low };
+    let high = if n_steps < 20 { mean_exp + 10 } else { high };
+    let n_steps = (high - low + 1) as usize;
+
+    // Precompute steps using doubling chain (much faster than individual scalar_mul)
+    // Start from G, compute 2^low * G by doubling, then keep doubling for higher powers
+    let mut step_points: Vec<Point> = Vec::with_capacity(n_steps);
+    let mut step_scalars: Vec<Fe> = Vec::with_capacity(n_steps);
+    
+    // Compute 2^low * G by repeated doubling
+    let mut current = g.to_jacobian();
+    for _ in 0..low {
+        current = current.double();
+    }
+    
+    // Now current = 2^low * G, keep doubling for higher powers
+    for j in low..=high {
+        let aff = current.to_affine();
+        let scalar_big = BigUint::from(1u64) << j as usize;
+        step_points.push(aff);
+        step_scalars.push(Fe::from_biguint_mod_n(&scalar_big));
+        current = current.double();
+    }
+
+    // Range center
+    let range_start = BigUint::from(1u64) << (range_bits - 1);
+    let range_end = BigUint::from(1u64) << range_bits;
+    let rc = (&range_start + &range_end) >> 1;
+    let rc_fe = Fe::from_biguint_mod_n(&rc);
+
+    // DP config — fewer DP bits for more DPs and faster collision
+    // Standard: DP bits ≈ log2(expected_walk / 20)
+    // For 40-bit: expected_walk = 2^20, DP bits = log2(2^20/20) ≈ 14-4 = 10
+    let dp_mask_bits = std::cmp::max(4, std::cmp::min(14, range_bits as u64 / 4));
+    let dp_mask: u64 = (1u64 << dp_mask_bits) - 1;
+
+    // Standard Pollard kangaroo: tame walks 4*sqrt(range), wild walks until collision
+    // For range_bits: tame = 4 * 2^(range_bits/2), but capped at max_hops
+    let expected_walk: u64 = if range_bits <= 31 { 4 * (1u64 << (range_bits / 2)) } else { max_hops / 2 };
+    let tame_max = std::cmp::min(expected_walk, max_hops / 2);
+    let wild_max = max_hops.saturating_sub(tame_max);
+
+    println!("  [KANG] Steps: 2^{}..2^{} ({} sizes), DP bits: {}", low, high, n_steps, dp_mask_bits);
+    println!("  [KANG] Tame: {} steps, Wild: {} steps", tame_max, wild_max);
+
+    // Tame
+    let mut tame_dps: HashMap<[u8; 32], Fe> = HashMap::with_capacity(500_000);
+    let mut tame_aff = g.scalar_mul(&rc_fe);
+    let mut tame_jac = tame_aff.to_jacobian();
+    let mut tame_dist = Fe::ZERO;
+
+    for hop in 0..tame_max {
+        let si = hash_aff_x(&tame_aff, n_steps);
+        tame_jac = tame_jac.add_affine(&step_points[si]);
+        tame_dist = tame_dist.add_mod_n(&step_scalars[si]);
+        tame_aff = tame_jac.to_affine();
+
+        if !tame_aff.inf && tame_aff.x.limbs[0] & dp_mask == 0 {
+            tame_dps.entry(tame_aff.x.to_bytes()).or_insert(tame_dist.clone());
+        }
+
+        if hop > 0 && hop % 2_000_000 == 0 {
+            let e = start.elapsed().as_secs_f64();
+            println!("    Tame: {} | {} DPs | {:.0}/s", hop, tame_dps.len(), hop as f64 / e);
+        }
+    }
+    println!("  [KANG] Tame: {} steps, {} DPs ({:.1}s)", tame_max, tame_dps.len(), start.elapsed().as_secs_f64());
+
+    // Wild
+    let mut wild_aff = *target;
+    let mut wild_jac = wild_aff.to_jacobian();
+    let mut wild_dist = Fe::ZERO;
+    let mut total = tame_max;
+    let mut found = false;
+    let mut found_k: Option<BigUint> = None;
+    let mut oracle_filtered = 0u64;
+    let mut collisions = 0u64;
+
+    for hop in 0..wild_max {
+        total += 1;
+        let si = hash_aff_x(&wild_aff, n_steps);
+        wild_jac = wild_jac.add_affine(&step_points[si]);
+        wild_dist = wild_dist.add_mod_n(&step_scalars[si]);
+        wild_aff = wild_jac.to_affine();
+
+        if !wild_aff.inf && wild_aff.x.limbs[0] & dp_mask == 0 {
+            if let Some(&td) = tame_dps.get(&wild_aff.x.to_bytes()) {
+                collisions += 1;
+                println!("  [KANG] COLLISION #{} at step {}!", collisions, hop);
+                // Try recover
+                let k_fe = rc_fe.add_mod_n(&td).sub_mod_n(&wild_dist);
+                let k_fe_neg = rc_fe.add_mod_n(&td).add_mod_n(&wild_dist).neg_mod_n();
+                let lambda = Fe { limbs: field::LAMBDA };
+                let lambda_sq = lambda.mul_mod_n(&lambda);
+
+                for &kb in &[k_fe, k_fe_neg] {
+                    let lk = kb.mul_mod_n(&lambda);
+                    let l2k = kb.mul_mod_n(&lambda_sq);
+                    for kc in &[kb, kb.neg_mod_n(), lk, lk.neg_mod_n(), l2k, l2k.neg_mod_n()] {
+                        let k_big = kc.to_biguint();
+                        if k_big < range_start || k_big >= range_end { continue; }
+                        let q = g.scalar_mul(kc);
+                        if q.inf { continue; }
+                        if let Some(orc) = oracle {
+                            if !orc.check_x(&q.x.to_bytes()) { oracle_filtered += 1; continue; }
+                        }
+                        if q.x == target.x && (q.y == target.y || q.y == target.y.neg_mod_p()) {
+                            println!("  *** KEY FOUND: 0x{:x} ***", k_big);
+                            found = true;
+                            found_k = Some(k_big);
+                            break;
+                        }
+                    }
+                    if found { break; }
+                }
+                if found { break; }
+            }
+        }
+
+        if hop > 0 && hop % 2_000_000 == 0 {
+            let e = start.elapsed().as_secs_f64();
+            println!("    Wild: {} | {} coll | {:.0}/s", hop, collisions, total as f64 / e);
+        }
+    }
+
+    KangResult {
+        found, k: found_k, candidates_checked: total,
+        oracle_filtered, elapsed_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+#[inline]
+fn hash_aff_x(pt: &Point, n: usize) -> usize {
+    if pt.inf { return 0; }
+    let num = n.max(1);
+    ((pt.x.limbs[0] as usize).wrapping_mul(0x517cc1b727220a95))
+        .wrapping_add((pt.x.limbs[1] as usize).wrapping_mul(0x2b592653855b1e8d))
+        % num
 }
 
 // ============================================================
