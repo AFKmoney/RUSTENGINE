@@ -44,7 +44,9 @@ pub struct LBESolver {
     pub range_bits: u32,
     pub lattice: Lattice6D,
     pub reduced_basis: Vec<[SignedBigUint; 6]>,
+    #[allow(dead_code)]
     pub basis_ec_points: Vec<Point>,
+    #[allow(dead_code)]
     pub basis_scalars: Vec<BigUint>,
     pub target_point: Point,
     pub oracle: Option<Round0Oracle>,
@@ -109,7 +111,7 @@ impl LBESolver {
             self.reduced_basis[2].clone(), self.reduced_basis[3].clone(),
             self.reduced_basis[4].clone(), self.reduced_basis[5].clone(),
         ];
-        let (coeffs, residual) = self.lattice.babai_cvp(&basis_arr, &range_center);
+        let (_coeffs, residual) = self.lattice.babai_cvp(&basis_arr, &range_center);
 
         let max_residual_bits = residual.iter().map(|r| r.bits()).max().unwrap_or(0);
 
@@ -133,6 +135,7 @@ impl LBESolver {
     }
 
     /// Direct enumeration around CVP solution for small residuals
+    #[allow(dead_code)]
     fn solve_enumeration(
         &self,
         basis: &[[SignedBigUint; 6]; 6],

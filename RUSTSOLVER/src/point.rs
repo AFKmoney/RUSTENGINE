@@ -25,6 +25,7 @@ impl Point {
         }
     }
 
+    #[allow(dead_code)]
     pub fn neg(&self) -> Self {
         if self.inf { return *self; }
         Point { x: self.x, y: self.y.neg_mod_p(), inf: false }
@@ -39,6 +40,7 @@ impl Point {
         }
     }
 
+    #[allow(dead_code)]
     pub fn add(&self, other: &Point) -> Point {
         self.to_jacobian().add_affine(other).to_affine()
     }
@@ -93,6 +95,7 @@ impl JacobianPoint {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn is_infinity(&self) -> bool {
         self.z.is_zero()
     }
@@ -158,6 +161,7 @@ impl JacobianPoint {
         JacobianPoint { x: x3, y: y3, z: z3 }
     }
 
+    #[allow(dead_code)]
     pub fn neg(&self) -> Self {
         if self.z.is_zero() { return *self; }
         JacobianPoint { x: self.x, y: self.y.neg_mod_p(), z: self.z }

@@ -29,11 +29,13 @@ pub struct SignedBigUint {
 impl SignedBigUint {
     pub fn from_biguint(v: BigUint) -> Self { SignedBigUint { val: v, neg: false } }
     pub fn from_u64(v: u64) -> Self { SignedBigUint { val: BigUint::from(v), neg: false } }
+    #[allow(dead_code)]
     pub fn from_i64(v: i64) -> Self {
         if v < 0 { SignedBigUint { val: BigUint::from((-v) as u64), neg: true } }
         else { SignedBigUint { val: BigUint::from(v as u64), neg: false } }
     }
     pub fn zero() -> Self { SignedBigUint { val: BigUint::zero(), neg: false } }
+    #[allow(dead_code)]
     pub fn one() -> Self { SignedBigUint { val: BigUint::one(), neg: false } }
     pub fn is_zero(&self) -> bool { self.val.is_zero() }
     pub fn is_negative(&self) -> bool { self.neg && !self.val.is_zero() }
@@ -83,9 +85,11 @@ struct Rat {
 }
 
 impl Rat {
+    #[allow(dead_code)]
     fn from_u64(v: u64) -> Self {
         Rat { num: BigUint::from(v), den: BigUint::one(), neg: false }
     }
+    #[allow(dead_code)]
     fn from_i64(v: i64) -> Self {
         if v < 0 { Rat { num: BigUint::from((-v) as u64), den: BigUint::one(), neg: true } }
         else { Rat { num: BigUint::from(v as u64), den: BigUint::one(), neg: false } }
@@ -94,6 +98,7 @@ impl Rat {
         Rat { num: sb.val.clone(), den: BigUint::one(), neg: sb.neg }
     }
     fn zero() -> Self { Rat { num: BigUint::zero(), den: BigUint::one(), neg: false } }
+    #[allow(dead_code)]
     fn one() -> Self { Rat { num: BigUint::one(), den: BigUint::one(), neg: false } }
     fn is_zero(&self) -> bool { self.num.is_zero() }
 
@@ -101,6 +106,7 @@ impl Rat {
         if self.num.is_zero() { self.clone() }
         else { Rat { num: self.num.clone(), den: self.den.clone(), neg: !self.neg } }
     }
+    #[allow(dead_code)]
     fn abs(&self) -> Self { Rat { num: self.num.clone(), den: self.den.clone(), neg: false } }
 
     fn add(&self, other: &Rat) -> Rat {
@@ -158,6 +164,7 @@ impl Rat {
     }
 
     /// Floor to integer (as SignedBigUint)
+    #[allow(dead_code)]
     fn floor_to_int(&self) -> SignedBigUint {
         let q = &self.num / &self.den;
         let r = &self.num % &self.den;
@@ -207,6 +214,7 @@ const PI_B_HEX: &str = "3086d221a7d46bcde86c90e49284eb15";
 // ============================================================
 
 pub struct Lattice6D {
+    #[allow(dead_code)]
     range_bits: u32,
     rc: BigUint,
     n: BigUint,
@@ -240,6 +248,7 @@ impl Lattice6D {
 
     pub fn range_center(&self) -> BigUint { self.rc.clone() }
     pub fn order(&self) -> BigUint { self.n.clone() }
+    #[allow(dead_code)]
     pub fn range_bits(&self) -> u32 { self.range_bits }
 
     pub fn build_and_reduce(&self) -> Vec<[SignedBigUint; DIM]> {

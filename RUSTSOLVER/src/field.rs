@@ -302,6 +302,7 @@ impl Fe {
         0
     }
 
+    #[allow(dead_code)]
     pub fn shr1(&self) -> Self {
         if self.limbs[0] & 1 != 0 {
             let (sum, _) = self.add_raw(&Fe { limbs: P });
@@ -325,6 +326,7 @@ impl Fe {
         }
     }
 
+    #[allow(dead_code)]
     pub fn power_of_2(n: u32) -> Self {
         if n < 64 {
             Fe { limbs: [1u64 << n, 0, 0, 0] }
@@ -374,6 +376,7 @@ impl Fe {
         BigUint::from_bytes_be(&self.to_bytes())
     }
 
+    #[allow(dead_code)]
     pub fn from_biguint_mod_p(v: &BigUint) -> Self {
         let p_big = BigUint::parse_bytes(
             b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16

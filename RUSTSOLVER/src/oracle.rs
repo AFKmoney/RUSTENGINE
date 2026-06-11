@@ -145,6 +145,7 @@ pub struct Round0Oracle {
     /// Target x-coordinate (32 bytes)
     pub target_x: [u8; 32],
     /// Round 0 SHA-256 state
+    #[allow(dead_code)]
     round0_state: [u32; 8],
     /// Inverted W[0] — the oracle's top prediction
     pub inverted_w0: u32,
@@ -153,8 +154,9 @@ pub struct Round0Oracle {
     /// Compressed pubkey prefix (0x02 or 0x03)
     pub prefix: u8,
     /// Full W schedule from target pubkey
+    #[allow(dead_code)]
     target_w: [u32; 16],
-    /// Multi-round states for rounds 0..7
+    #[allow(dead_code)]
     round_states: Vec<[u32; 8]>,
     /// Inverted W[0..7] — the oracle's predictions
     inverted_w: [u32; 8],
@@ -162,6 +164,7 @@ pub struct Round0Oracle {
     pub x_predicted: [u8; 32],
     /// Filter bits: how many bits of x we can check cheaply
     /// 24 bits from W[0] alone, up to 248 bits from W[0..7]
+    #[allow(dead_code)]
     pub filter_bits: usize,
 }
 
@@ -284,6 +287,7 @@ impl Round0Oracle {
     /// rounds=1: top 56 bits (1/2^56 pass rate)
     /// rounds=7: full 248 bits (1/2^248 pass rate — essentially unique)
     #[inline]
+    #[allow(dead_code)]
     pub fn check_x_n_rounds(&self, x_bytes: &[u8; 32], rounds: usize) -> bool {
         let bytes_needed = 3 + rounds * 4;
         if bytes_needed > 32 { return self.check_x_full(x_bytes); }
@@ -338,6 +342,7 @@ impl Round0Oracle {
     ///   - Effective speedup: 256x (the "208x" is a conservative estimate)
 
     /// Hash160: SHA-256 then RIPEMD-160 (for Bitcoin address verification)
+    #[allow(dead_code)]
     pub fn hash160(pubkey_bytes: &[u8]) -> [u8; 20] {
         let sha = Sha256::digest(pubkey_bytes);
         use ripemd::Ripemd160;
