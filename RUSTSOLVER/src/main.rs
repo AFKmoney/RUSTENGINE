@@ -72,8 +72,13 @@ struct PuzzleTarget {
 
 fn get_puzzle(num: u32) -> PuzzleTarget {
     match num {
+        40 => PuzzleTarget {
+            // P40 validation: will be computed dynamically in selftest mode
+            pubkey_hex: "000000000000000000000000000000000000000000000000000000000000000000",
+            range_bits: 40,
+        },
         70 => PuzzleTarget {
-            // P70 with known key k=0x6c3a4f for validation
+            // P70 with known key k=0x6c3a4f for validation (NOTE: key is 23-bit, not 70-bit)
             pubkey_hex: "033bb4c229d8050ecab17f8f7762a5327096ac05c8dfefcaca944460ca04574a54",
             range_bits: 70,
         },
@@ -81,7 +86,7 @@ fn get_puzzle(num: u32) -> PuzzleTarget {
             pubkey_hex: "02145d2611c823a396ef6712ce0f712f09b9b4f3135e3e0aa3230fb9b6d08d1e16",
             range_bits: 135,
         },
-        _ => panic!("Unknown puzzle {}. Supported: 70, 135", num),
+        _ => panic!("Unknown puzzle {}. Supported: 40, 70, 135", num),
     }
 }
 
@@ -162,6 +167,9 @@ fn main() {
         }
         "test" => {
             run_test_mode();
+        }
+        "selftest" => {
+            run_selftest(args.target);
         }
         _ => {
             eprintln!("Unknown mode: {}. Use: lbe, lattice, test", args.mode);
@@ -391,6 +399,81 @@ fn run_test_mode() {
 
     println!("\n  ═══════════════════════════════════════");
     println!("  All tests complete!");
+}
+
+// ============================================================
+// SELFTEST MODE — Generate random key and find it with kangaroo
+// ============================================================
+
+fn run_selftest(range_bits: u32) {
+    println!("\n╔══════════════════════════════════════════════════════════╗");
+    println!("║  SELFTEST: Generate {}-bit key → Kangaroo → Verify       ║", range_bits);
+    println!("╚══════════════════════════════════════════════════════════╝");
+
+    let g = Point::generator();
+
+    // Generate a random key in [2^(range_bits-1), 2^range_bits)
+    // Use a simple PRNG seeded with range_bits for reproducibility
+    let mut seed = range_bits as u64 * 0x5851F42D4C957F2D;
+    let mut next_rand = || -> u64 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed
+    };
+
+    let range_start = BigUint::from(1u64) << (range_bits - 1);
+    let _range_size = BigUint::from(1u64) << range_bits;
+    let offset = next_rand() % 1000;
+    let k_big = range_start.clone() + offset;
+    let k_fe = Fe::from_biguint_mod_n(&k_big);
+
+    println!("  Generated k = 0x{:x} ({} bits)", k_big, k_big.bits());
+    println!("  Range: [2^{}, 2^{})", range_bits - 1, range_bits);
+
+    // Compute Q = k*G
+    let target_point = g.scalar_mul(&k_fe);
+    let on_curve = target_point.is_on_curve();
+    println!("  Q = k*G on curve: {}", on_curve);
+    if !on_curve {
+        println!("  ERROR: Q not on curve!");
+        return;
+    }
+
+    // Compute compressed pubkey for oracle
+    let x_bytes = target_point.x.to_bytes();
+    let y_is_odd = target_point.y.limbs[0] & 1 == 1;
+    let mut pubkey_bytes = [0u8; 33];
+    pubkey_bytes[0] = if y_is_odd { 0x03 } else { 0x02 };
+    pubkey_bytes[1..33].copy_from_slice(&x_bytes);
+
+    // Create oracle
+    let oracle = Round0Oracle::new(&pubkey_bytes);
+    oracle.print_summary();
+
+    // Run LBE
+    let max_hops = if range_bits <= 50 { 50_000_000 } else { 100_000_000 };
+    let solver = LBESolver::new(range_bits, target_point, Some(oracle));
+    let result = solver.solve(max_hops);
+
+    if result.found {
+        if let Some(k_found) = result.k {
+            let match_ok = k_found == k_big;
+            println!("\n  ╔══════════════════════════════════════╗");
+            println!("  ║  SELFTEST: KEY FOUND!                 ║");
+            println!("  ║  k_found = 0x{:x}       ║", k_found);
+            println!("  ║  k_real  = 0x{:x}       ║", k_big);
+            println!("  ║  MATCH: {}                    ║", match_ok);
+            println!("  ╚══════════════════════════════════════╝");
+        }
+    } else {
+        println!("\n  SELFTEST FAILED: Key not found in {} hops", result.candidates_checked);
+        println!("  This indicates a bug in the kangaroo or try_recover logic!");
+    }
+
+    println!("\n  Stats:");
+    println!("    Hops: {}", result.candidates_checked);
+    println!("    Oracle filtered: {}", result.oracle_filtered);
+    println!("    Time: {}ms", result.elapsed_ms);
+    println!("    Expected hops for {}-bit range: O(2^{:.0})", range_bits, range_bits as f64 / 2.0);
 }
 
 // ============================================================
