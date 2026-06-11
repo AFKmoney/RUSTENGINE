@@ -1,5 +1,5 @@
-//! RUSTSOLVER v2 — secp256k1 EC Point with Jacobian Coordinates
-//! =============================================================
+//! RUSTSOLVER v3 — secp256k1 EC Point with Jacobian Coordinates + GLV
+//! ================================================================
 
 use crate::field::Fe;
 
@@ -59,6 +59,8 @@ impl Point {
     }
 
     /// GLV endomorphism: phi(P) = (beta*x, y)
+    /// Since beta^3 = 1 mod P, this maps P to an equivalent point
+    /// whose discrete log is lambda * k mod N
     pub fn glv_phi(&self) -> Self {
         if self.inf { return *self; }
         let beta = Fe { limbs: BETA };

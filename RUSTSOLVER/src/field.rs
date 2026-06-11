@@ -1,7 +1,8 @@
-//! RUSTSOLVER v2 — Native u64x4 Modular Arithmetic for secp256k1
+//! RUSTSOLVER v3 — Native u64x4 Modular Arithmetic for secp256k1
 //! ================================================================
 //! ZERO BigUint in the hot path. Pure u64x4 limb arithmetic.
 //! FAST reduce512() for secp256k1 special prime P = 2^256 - 2^32 - 977.
+//! BigUint fallback for mod N (no special form).
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -22,12 +23,12 @@ pub const P: [u64; 4] = [
 /// Group order N
 pub const N: [u64; 4] = [
     0xBFD25E8CD0364141,
-    0xBAEDCE6AF48A03BB,
+    0xBAAEDCE6AF48A03B,
     0xFFFFFFFFFFFFFFFE,
     0xFFFFFFFFFFFFFFFF,
 ];
 
-/// Beta: non-trivial cube root of unity mod P (β³ ≡ 1 mod P)
+/// Beta: non-trivial cube root of unity mod P (beta^3 = 1 mod P)
 pub const BETA: [u64; 4] = [
     0xC1396C28719501EE,
     0x9CF0497512F58995,
@@ -35,11 +36,11 @@ pub const BETA: [u64; 4] = [
     0x7AE96A2B657C0710,
 ];
 
-/// Lambda: non-trivial cube root of unity mod N (λ³ ≡ 1 mod N)
+/// Lambda: non-trivial cube root of unity mod N (lambda^3 = 1 mod N)
 pub const LAMBDA: [u64; 4] = [
     0xDF02967C1B23BD72,
-    0x812645A122E22EA2,
-    0x000000A5261C0288,
+    0x122E22EA20816678,
+    0xA5261C028812645A,
     0x5363AD4CC05C30E0,
 ];
 
@@ -190,9 +191,6 @@ impl Fe {
 
     #[inline]
     fn add_p(&self) -> Self {
-        // When called from sub(), self is the result of an underflowed subtraction,
-        // so self is in (2^256 - P, 2^256). Adding P overflows 2^256, but discarding
-        // the carry gives exactly self + P - 2^256 = (original_a - original_b) + P.
         let (r, _carry) = self.add_raw(&Fe { limbs: P });
         r
     }
@@ -450,7 +448,7 @@ fn sbb(a: u64, b: u64, borrow_in: u64) -> (u64, u64) {
 // ============================================================
 
 /// Reduce a 512-bit number mod P using the special form of P.
-/// P = 2^256 - 2^32 - 977  =>  2^256 ≡ 2^32 + 977 (mod P)
+/// P = 2^256 - 2^32 - 977  =>  2^256 = 2^32 + 977 (mod P)
 /// MUL = 2^32 + 977 = 0x1000003D1 (33 bits)
 fn reduce512(prod: &[u64; 8]) -> Fe {
     const MUL: u64 = 0x1000003D1;
@@ -463,7 +461,7 @@ fn reduce512(prod: &[u64; 8]) -> Fe {
     t[2] = prod[2] as u128;
     t[3] = prod[3] as u128;
 
-    // Fold high 256 bits: hi * 2^256 ≡ hi * MUL (mod P)
+    // Fold high 256 bits: hi * 2^256 = hi * MUL (mod P)
     for i in 0..4usize {
         let c = prod[4 + i] as u128 * MUL as u128;
         t[i] += c & 0xFFFFFFFFFFFFFFFF;
