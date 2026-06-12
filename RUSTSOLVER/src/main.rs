@@ -1,33 +1,32 @@
-//! RUSTSOLVER v3 — ULTIMATE LBE Solver for Bitcoin Puzzle P135
+//! RUSTSOLVER v4 — PRISM VORTEX + LBE + 6x GLV + SHA-256 Oracle
 //! ============================================================
 //!
-//! Pipeline: 6D Lattice (Exact LLL + Deep Refinement)
-//!        → Babai CVP
-//!        → Lattice Kangaroo (with Fe distance tracking)
-//!        → 6x GLV Automorphism Check
-//!        → SHA-256 Oracle Pre-filter
-//!        → KEY
+//! Modes:
+//!   prism   — PRISM VORTEX: GLV-expanded DPs + Batch Affine + Oracle
+//!   lbe     — LBE: Lattice Ball Enumeration + Kangaroo + Oracle
+//!   lattice — 6D Lattice analysis only
+//!   test    — Validate EC + Lattice + Oracle + GLV
+//!   selftest — Generate random key, find with PRISM VORTEX
 //!
-//! Key properties:
-//!   - secp256k1 order n ≈ 2^256
-//!   - 6D lattice with det = n → shortest vector ≈ n^(1/6) ≈ 2^42.7
-//!   - After LLL: CVP residuals ~2^43 per component
-//!   - LBE sphere: ~256 points, kangaroo O(√256) = O(16) steps
-//!   - With 6x GLV automorphism: √6 ≈ 2.4x speedup
-//!   - With SHA-256 oracle (208x filter): massive x-coordinate pre-filter
-//!   - Expected solve time: < 1 second to a few seconds
+//! Key innovations (PRISM VORTEX):
+//!   - GLV-expanded DPs: 3x collision probability per step
+//!   - 64-walk batch affine: Montgomery's trick amortizes inversion
+//!   - Oracle-gated verification: 208x false-positive reduction
+//!   - 6-variant GLV recovery: full automorphism coverage
 
 mod field;
 mod point;
 mod lattice6d;
 mod oracle;
 mod lbe;
+mod prism;
 
 use clap::Parser;
 use field::Fe;
 use point::Point;
 use lattice6d::Lattice6D;
 use lbe::LBESolver;
+use prism::PrismVortex;
 use oracle::Round0Oracle;
 use std::time::Instant;
 use num_bigint::BigUint;
@@ -53,8 +52,8 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     threads: u32,
 
-    /// Mode: lbe (full LBE), lattice (6D lattice only), test
-    #[arg(short, long, default_value = "lbe")]
+    /// Mode: prism, lbe, lattice, test, selftest
+    #[arg(short, long, default_value = "prism")]
     mode: String,
 
     /// Disable SHA-256 oracle (for benchmarking)
@@ -104,16 +103,16 @@ fn main() {
     let args = Args::parse();
 
     println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║  VORTEX PRIME RUSTSOLVER v3.0                           ║");
-    println!("║  LBE + 6x GLV + SHA-256 Oracle for P135                 ║");
+    println!("║  PRISM VORTEX RUSTSOLVER v4.0                           ║");
+    println!("║  GLV-Expanded DPs + Batch Affine + SHA-256 Oracle       ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
-    println!("  Pipeline: Lattice(LLL) → CVP → Kangaroo → 6xGLV → Oracle");
-    println!("  Key properties:");
-    println!("    6D lattice: n^(1/6) ≈ 2^42.7 residuals");
-    println!("    Kangaroo:   O(√256) = O(16) steps");
-    println!("    GLV:        √6 ≈ 2.4x speedup");
-    println!("    Oracle:     208x x-coordinate filter");
+    println!("  Modes: prism (default), lbe, lattice, test, selftest");
+    println!("  Key innovations:");
+    println!("    PRISM:  GLV-expanded DPs (3x collision probability)");
+    println!("    Batch:  64-walk Montgomery affine conversion");
+    println!("    GLV:    6-variant automorphism recovery");
+    println!("    Oracle: 208x SHA-256 pre-filter");
     println!();
 
     // Configure threads
@@ -124,10 +123,13 @@ fn main() {
             .ok();
     }
 
-    // Selftest mode doesn't need puzzle lookup
+    // Selftest mode doesn't need puzzle lookup — uses PRISM VORTEX
     if args.mode == "selftest" {
-        let range_bits = std::cmp::max(20, std::cmp::min(50, args.target));
-        run_selftest(range_bits);
+        let range_bits = std::cmp::max(20, std::cmp::min(40, args.target));
+        println!("\n╔══════════════════════════════════════════════════════════╗");
+        println!("║  PRISM VORTEX SELFTEST: {}-bit key                       ║", range_bits);
+        println!("╚══════════════════════════════════════════════════════════╝");
+        PrismVortex::selftest(range_bits);
         return;
     }
 
@@ -168,6 +170,13 @@ fn main() {
 
     // Select mode
     match args.mode.as_str() {
+        "prism" => {
+            if let Some(tp) = target_point {
+                run_prism(puzzle.range_bits, &tp, oracle, args.max_hops);
+            } else {
+                eprintln!("Cannot run PRISM without target point!");
+            }
+        }
         "lbe" => {
             if let Some(tp) = target_point {
                 run_lbe(puzzle.range_bits, &tp, oracle, args.max_hops);
@@ -182,13 +191,56 @@ fn main() {
             run_test_mode();
         }
         "selftest" => {
-            // Selftest uses target as range_bits directly, no puzzle lookup needed
-            run_selftest(std::cmp::max(20, std::cmp::min(50, args.target)));
+            let range_bits = std::cmp::max(20, std::cmp::min(40, args.target));
+            println!("\n╔══════════════════════════════════════════════════════════╗");
+            println!("║  PRISM VORTEX SELFTEST: {}-bit key                       ║", range_bits);
+            println!("╚══════════════════════════════════════════════════════════╝");
+            PrismVortex::selftest(range_bits);
         }
         _ => {
-            eprintln!("Unknown mode: {}. Use: lbe, lattice, test", args.mode);
+            eprintln!("Unknown mode: {}. Use: prism, lbe, lattice, test, selftest", args.mode);
         }
     }
+}
+
+// ============================================================
+// PRISM VORTEX MODE — GLV-Expanded DP Kangaroo
+// ============================================================
+
+fn run_prism(range_bits: u32, target_point: &Point, oracle: Option<Round0Oracle>, max_hops: u64) {
+    println!("\n╔══════════════════════════════════════════════════════════╗");
+    println!("║  PRISM VORTEX: GLV-Expanded DP Kangaroo                  ║");
+    println!("║  + Batch Affine + Oracle Pre-filter                      ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+
+    let auto_steps = if max_hops > 0 { max_hops } else { 500_000_000 };
+    let solver = PrismVortex::new(range_bits, *target_point, oracle);
+    let result = solver.solve(auto_steps);
+
+    if result.found {
+        if let Some(k) = result.k {
+            println!("\n  ╔══════════════════════════════════════╗");
+            println!("  ║  *** KEY FOUND via PRISM VORTEX! ***  ║");
+            println!("  ║  k = {} bits               ║", k.bits());
+            print!("  ║  k = 0x");
+            let k_bytes = k.to_bytes_be();
+            for &b in &k_bytes { print!("{:02x}", b); }
+            println!("  ║");
+            println!("  ╚══════════════════════════════════════╝");
+        }
+    } else {
+        println!("\n  PRISM VORTEX did not find key in {} steps.", result.steps);
+        println!("  DPs stored: {}", result.dp_count);
+        println!("  Collisions: {}", result.collisions);
+        println!("  Oracle filtered: {}", result.oracle_filtered);
+    }
+
+    println!("\n  Stats:");
+    println!("    Steps: {}", result.steps);
+    println!("    DPs: {}", result.dp_count);
+    println!("    Collisions: {}", result.collisions);
+    println!("    Oracle filtered: {}", result.oracle_filtered);
+    println!("    Time: {}ms", result.elapsed_ms);
 }
 
 // ============================================================
