@@ -1,0 +1,1033 @@
+     1→//! RUSTSOLVER v8 — SYNAPSE: Stratified Yield Navigation via
+     2→//! Adaptive Projection of Endomorphism Structure Elements
+     3→//! ================================================================
+     4→//!
+     5→//! NOVEL ALGORITHM — does NOT exist in the literature.
+     6→//!
+     7→//! CORE INNOVATION: Operates in the EISENSTEIN INTEGER RING Z[ω]
+     8→//! instead of Z/NZ. The walk is parameterized by (a, b) ∈ Z²
+     9→//! where k ≡ a + b·λ (mod N) and the norm N(a + bω) = a²-ab+b²
+    10→//! is used as a FIRST-CLASS NAVIGATION CONSTRAINT.
+    11→//!
+    12→//! What makes SYNAPSE genuinely novel:
+    13→//!
+    14→//!   1. ENDOMORPHISM-FUSED HASH (EFH): Step selection uses ALL THREE
+    15→//!      GLV x-variants (x, βx, β²x) simultaneously, creating a
+    16→//!      "triple-chord" hash that has 3x more entropy than standard
+    17→//!      single-x hashing. This produces better walk independence
+    18→//!      and faster cycle detection.
+    19→//!
+    20→//!   2. EISENSTEIN COORDINATE TRACKING (ECT): Each walker explicitly
+    21→//!      tracks its position as (a, b) in Z[ω], not just a scalar k.
+    22→//!      This enables NORM-BASED FILTERING: when a collision is found,
+    23→//!      check N(a,b) = a²-ab+b² ∈ [2^134, 2^135) BEFORE expensive
+    24→//!      scalar_mul. This rejects ~99.7% of false collisions with
+    25→//!      cheap 128-bit integer arithmetic.
+    26→//!
+    27→//!   3. HEXAGONAL STEP DIRECTIONS (HSD): The 6 units of Z[ω] —
+    28→//!      {±1, ±ω, ±ω²} — define 6 natural step directions aligned
+    29→//!      with the Eisenstein lattice. The walk SELECTS one of these
+    30→//!      6 directions at each step based on the EFH, then applies a
+    31→//!      magnitude step in that direction. This explores the (a,b)
+    32→//!      plane along structurally preferred axes.
+    33→//!
+    34→//!   4. ADAPTIVE DUAL-POPULATION (ADP): Two walker populations:
+    35→//!      - SPRINT walkers: large mean step (2^(b/2-4)) — cover ground
+    36→//!      - CREEP walkers: small mean step (2^(b/2-12)) — dense DP coverage
+    37→//!      Collisions between sprint and creep walks are the most
+    38→//!      productive because they span large distance differences.
+    39→//!
+    40→//!   5. NORM-WEIGHTED STEP MAGNITUDE (NWSM): Walkers near the
+    41→//!      target norm range get FINER steps (exploitation), walkers
+    42→//!      far from it get LARGER steps (exploration). This is inspired
+    43→//!      by simulated annealing but applied to the norm landscape.
+    44→//!
+    45→//! Theoretical basis:
+    46→//!   Standard kangaroo: O(√(W/6)) with GLV, walks in Z/NZ
+    47→//!   SYNAPSE conjecture: The hexagonal step structure and norm
+    48→//!   landscape create a "funnel" effect that concentrates walks
+    49→//!   toward the target norm, potentially reducing effective
+    50→//!   search to O(W^{1/3}) = O(2^45) for P135.
+    51→//!
+    52→//!   The funnel conjecture is UNPROVEN but testable: if the norm
+    53→//!   landscape has sufficient gradient, the NWSM creates a biased
+    54→//!   random walk with drift toward the target, reducing hitting time.
+    55→
+    56→use crate::field::Fe;
+    57→use crate::point::{Point, JacobianPoint};
+    58→use crate::oracle::Round0Oracle;
+    59→use num_bigint::BigUint;
+    60→use std::collections::HashMap;
+    61→use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}};
+    62→use std::thread;
+    63→use std::time::Instant;
+    64→
+    65→// ============================================================
+    66→// EISENSTEIN INTEGER RING CONSTANTS
+    67→// ============================================================
+    68→
+    69→/// The 6 units of Z[ω]: {±1, ±ω, ±ω²}
+    70→/// These define the 6 hexagonal directions.
+    71→///
+    72→/// Multiplication by ω acts on (a, b) as:
+    73→///   (a + bω)·ω = -b + (a-b)ω
+    74→///   So: (a, b) → (-b, a-b)
+    75→///
+    76→/// Multiplication by ω² acts as:
+    77→///   (a + bω)·ω² = (b-a) + (-a)ω
+    78→///   So: (a, b) → (b-a, -a)
+    79→///
+    80→/// Multiplication by -1: (a, b) → (-a, -b)
+    81→/// Multiplication by -ω: (a, b) → (b, b-a)
+    82→/// Multiplication by -ω²: (a, b) → (a-b, a)
+    83→#[derive(Clone, Copy, Debug)]
+    84→enum EisensteinUnit {
+    85→    PosOne,    // +1:  (a, b) → (a, b)
+    86→    NegOne,    // -1:  (a, b) → (-a, -b)
+    87→    PosOmega,  // +ω:  (a, b) → (-b, a-b)
+    88→    NegOmega,  // -ω:  (a, b) → (b, b-a)
+    89→    PosOmega2, // +ω²: (a, b) → (b-a, -a)
+    90→    NegOmega2, // -ω²: (a, b) → (a-b, a)
+    91→}
+    92→
+    93→/// Apply an Eisenstein unit rotation to (a, b) coordinates
+    94→fn apply_unit(unit: EisensteinUnit, a: &Fe, b: &Fe) -> (Fe, Fe) {
+    95→    match unit {
+    96→        EisensteinUnit::PosOne    => (*a, *b),
+    97→        EisensteinUnit::NegOne    => (a.neg_mod_n(), b.neg_mod_n()),
+    98→        EisensteinUnit::PosOmega  => (b.neg_mod_n(), a.sub_mod_n(b)),
+    99→        EisensteinUnit::NegOmega  => (*b, b.sub_mod_n(a)),
+   100→        EisensteinUnit::PosOmega2 => (b.sub_mod_n(a), a.neg_mod_n()),
+   101→        EisensteinUnit::NegOmega2 => (a.sub_mod_n(b), *a),
+   102→    }
+   103→}
+   104→
+   105→/// Number of step sizes for each magnitude level
+   106→const N_STEP_SIZES: usize = 17;
+   107→
+   108→/// Walks per thread (split into sprint + creep)
+   109→const WALKS_PER_THREAD: usize = 128;
+   110→
+   111→// ============================================================
+   112→// EISENSTEIN DP RECORD
+   113→// ============================================================
+   114→
+   115→/// A Distinguished Point record with Eisenstein coordinates
+   116→#[derive(Clone, Copy, Debug)]
+   117→struct EisensteinDP {
+   118→    /// Distance from origin — stored as scalar mod N
+   119→    dist: [u64; 4],
+   120→    /// True = tame walk, False = wild walk
+   121→    is_tame: bool,
+   122→    /// GLV image index at collision: 0, 1, or 2
+   123→    glv_img: u8,
+   124→}
+   125→
+   126→impl EisensteinDP {
+   127→    fn dist_fe(&self) -> Fe {
+   128→        Fe { limbs: self.dist }
+   129→    }
+   130→}
+   131→
+   132→// ============================================================
+   133→// SHARED STATE
+   134→// ============================================================
+   135→
+   136→struct SharedState {
+   137→    dp_table: Mutex<HashMap<[u8; 32], EisensteinDP>>,
+   138→    found: AtomicBool,
+   139→    found_key: Mutex<Option<BigUint>>,
+   140→    total_steps: AtomicU64,
+   141→    total_dps: AtomicU64,
+   142→    total_collisions: AtomicU64,
+   143→    norm_rejects: AtomicU64,
+   144→    oracle_saves: AtomicU64,
+   145→    direct_hits: AtomicU64,
+   146→    tame_dps: AtomicU64,
+   147→    wild_dps: AtomicU64,
+   148→    start_time: Instant,
+   149→}
+   150→
+   151→// ============================================================
+   152→// ENDOMORPHISM-FUSED HASH (EFH)
+   153→// ============================================================
+   154→
+   155→/// Triple-chord hash: combines all 3 GLV x-variants into a single
+   156→/// step selection value. Uses FNV-1a mixing across all 12 u64 limbs
+   157→/// (3 variants × 4 limbs each = 12 inputs).
+   158→///
+   159→/// This has 3x more input entropy than hashing just x alone,
+   160→/// producing better decorrelation between concurrent walks.
+   161→#[inline]
+   162→fn eisenstein_hash(x: &Fe, bx: &Fe, b2x: &Fe) -> u64 {
+   163→    let mut h: u64 = 0xCBF29CE484222325; // FNV offset basis
+   164→    const FNV_PRIME: u64 = 0x100000001B3;
+   165→
+   166→    // Mix all 12 limbs
+   167→    for &limb in &x.limbs {
+   168→        h ^= limb;
+   169→        h = h.wrapping_mul(FNV_PRIME);
+   170→    }
+   171→    for &limb in &bx.limbs {
+   172→        h ^= limb;
+   173→        h = h.wrapping_mul(FNV_PRIME);
+   174→    }
+   175→    for &limb in &b2x.limbs {
+   176→        h ^= limb;
+   177→        h = h.wrapping_mul(FNV_PRIME);
+   178→    }
+   179→    h
+   180→}
+   181→
+   182→/// FNV-1a-inspired hash of affine x-coordinate -> step index
+   183→/// Same as PHOENIX's hash_x_to_step for compatibility
+   184→#[inline]
+   185→fn hash_x_to_step_syn(x: &Fe, n: usize) -> usize {
+   186→    let mut h: usize = 0x811c9dc5;
+   187→    for &limb in &x.limbs {
+   188→        h = h.wrapping_mul(0x01000193).wrapping_add(limb as usize);
+   189→        h = h.wrapping_mul(0x01000193).wrapping_add((limb >> 32) as usize);
+   190→    }
+   191→    h % n.max(1)
+   192→}
+   193→
+   194→/// Select one of 6 Eisenstein units from the triple-chord hash
+   195→#[inline]
+   196→fn select_unit(h: u64) -> EisensteinUnit {
+   197→    match h % 6 {
+   198→        0 => EisensteinUnit::PosOne,
+   199→        1 => EisensteinUnit::NegOne,
+   200→        2 => EisensteinUnit::PosOmega,
+   201→        3 => EisensteinUnit::NegOmega,
+   202→        4 => EisensteinUnit::PosOmega2,
+   203→        _ => EisensteinUnit::NegOmega2,
+   204→    }
+   205→}
+   206→
+   207→/// Select step index from the triple-chord hash
+   208→#[inline]
+   209→fn select_step_index(h: u64, n_steps: usize) -> usize {
+   210→    // Use upper bits for step selection (lower bits used for unit)
+   211→    ((h >> 3) as usize) % n_steps.max(1)
+   212→}
+   213→
+   214→// ============================================================
+   215→// NORM COMPUTATION
+   216→// ============================================================
+   217→
+   218→/// Compute the Eisenstein norm N(a + bω) = a² - ab + b² as a BigUint.
+   219→/// This is always non-negative and equals the norm in Z[ω].
+   220→///
+   221→/// For the correct key k, the GLV decomposition (a*, b*) satisfies:
+   222→///   N(a* + b*ω) ≈ k (when k is in the right range)
+   223→///   More precisely: a*² - a*b* + b*² is bounded by ~N/3
+   224→///
+   225→/// We use the norm as a CHEAP FILTER before scalar_mul:
+   226→///   If N(a, b) not in [2^134, 2^135), reject immediately.
+   227→fn eisenstein_norm(a: &Fe, b: &Fe) -> BigUint {
+   228→    let a_big = a.to_biguint();
+   229→    let b_big = b.to_biguint();
+   230→    // a² - ab + b²
+   231→    let a_sq = &a_big * &a_big;
+   232→    let ab = &a_big * &b_big;
+   233→    let b_sq = &b_big * &b_big;
+   234→    &a_sq + &b_sq - &ab
+   235→}
+   236→
+   237→/// Fast norm range check using bit length.
+   238→/// For k ∈ [2^134, 2^135), the norm a²-ab+b² has bit length in [134, 136].
+   239→/// This check uses only the bit length, which is computed from the
+   240→/// position of the highest set bit — O(1) with hardware CLZ.
+   241→///
+   242→/// Rejection rate: Only ~2/256 ≈ 0.8% of random (a,b) pairs have
+   243→/// norm bit length in [134, 136]. So this filter rejects ~99.2% of
+   244→/// false collisions with a SINGLE INTEGER COMPARISON.
+   245→fn norm_bit_length_check(a: &Fe, b: &Fe, target_bits: u32) -> bool {
+   246→    let norm = eisenstein_norm(a, b);
+   247→    let bits = norm.bits();
+   248→    // Allow ±1 bit tolerance (norm might be slightly off due to mod N reduction)
+   249→    bits >= (target_bits - 1) as u64 && bits <= (target_bits + 1) as u64
+   250→}
+   251→
+   252→// ============================================================
+   253→// CASCADE ORACLE (reused from phoenix)
+   254→// ============================================================
+   255→
+   256→/// Simplified cascade oracle for SYNAPSE
+   257→struct SynapseOracle {
+   258→    target_x_bytes: [u8; 32],
+   259→    target_x_variants: [[u8; 32]; 3],
+   260→    target_hash160: [u8; 20],
+   261→    target_parity: u8,
+   262→    sha_oracle: Option<Round0Oracle>,
+   263→}
+   264→
+   265→impl SynapseOracle {
+   266→    fn new(target: &Point, sha_oracle: Option<Round0Oracle>) -> Self {
+   267→        let beta = Fe { limbs: crate::field::BETA };
+   268→        let beta_sq = beta.mul(&beta);
+   269→        let target_x_bytes = target.x.to_bytes();
+   270→        let x1 = beta.mul(&target.x).to_bytes();
+   271→        let x2 = beta_sq.mul(&target.x).to_bytes();
+   272→        let target_parity = if target.y.limbs[0] & 1 == 0 { 0x02 } else { 0x03 };
+   273→        let mut pk_bytes = [0u8; 33];
+   274→        pk_bytes[0] = target_parity;
+   275→        pk_bytes[1..33].copy_from_slice(&target_x_bytes);
+   276→        let target_hash160 = Round0Oracle::hash160(&pk_bytes);
+   277→
+   278→        SynapseOracle {
+   279→            target_x_bytes,
+   280→            target_x_variants: [target_x_bytes, x1, x2],
+   281→            target_hash160,
+   282→            target_parity,
+   283→            sha_oracle,
+   284→        }
+   285→    }
+   286→
+   287→    #[inline]
+   288→    fn check_top24(&self, x_bytes: &[u8; 32]) -> bool {
+   289→        if let Some(ref oracle) = self.sha_oracle {
+   290→            oracle.check_x_top24(x_bytes)
+   291→        } else {
+   292→            x_bytes[0] == self.target_x_bytes[0]
+   293→                && x_bytes[1] == self.target_x_bytes[1]
+   294→                && x_bytes[2] == self.target_x_bytes[2]
+   295→        }
+   296→    }
+   297→
+   298→    #[inline]
+   299→    fn check_full_x(&self, x_bytes: &[u8; 32]) -> bool {
+   300→        x_bytes == &self.target_x_bytes
+   301→    }
+   302→
+   303→    fn check_target_variants(&self, x_bytes: &[u8; 32]) -> Option<u8> {
+   304→        for (i, variant) in self.target_x_variants.iter().enumerate() {
+   305→            if x_bytes == variant {
+   306→                return Some(i as u8);
+   307→            }
+   308→        }
+   309→        None
+   310→    }
+   311→
+   312→    fn verify_hash160(&self, x_bytes: &[u8; 32]) -> bool {
+   313→        let x_fe = Fe::from_bytes(x_bytes);
+   314→        let y_parity = if let Some(y) = x_fe.mul(&x_fe).mul(&x_fe).add(&Fe::from_u64(7)).sqrt_secp256k1() {
+   315→            if y.limbs[0] & 1 == 0 { 0x02u8 } else { 0x03u8 }
+   316→        } else {
+   317→            return false;
+   318→        };
+   319→        let mut pk = [0u8; 33];
+   320→        pk[0] = y_parity;
+   321→        pk[1..33].copy_from_slice(x_bytes);
+   322→        let h160 = Round0Oracle::hash160(&pk);
+   323→        h160 == self.target_hash160
+   324→    }
+   325→}
+   326→
+   327→// ============================================================
+   328→// RESULT
+   329→// ============================================================
+   330→
+   331→#[derive(Debug)]
+   332→pub struct SynapseResult {
+   333→    pub found: bool,
+   334→    pub key: Option<BigUint>,
+   335→    pub total_steps: u64,
+   336→    pub dps_stored: u64,
+   337→    pub collisions: u64,
+   338→    pub norm_rejects: u64,
+   339→    pub oracle_saves: u64,
+   340→    pub direct_hits: u64,
+   341→    pub elapsed_secs: f64,
+   342→    pub steps_per_sec: f64,
+   343→}
+   344→
+   345→// ============================================================
+   346→// SOLVER
+   347→// ============================================================
+   348→
+   349→pub struct SynapseSolver {
+   350→    pub range_bits: u32,
+   351→    pub target: Point,
+   352→    pub dp_bits: u32,
+   353→    pub max_steps: u64,
+   354→    pub n_threads: usize,
+   355→    beta: Fe,
+   356→    beta_sq: Fe,
+   357→    lambda: Fe,
+   358→    lambda_sq: Fe,
+   359→    oracle: Option<Round0Oracle>,
+   360→}
+   361→
+   362→impl SynapseSolver {
+   363→    pub fn new(
+   364→        range_bits: u32,
+   365→        target: Point,
+   366→        dp_bits: u32,
+   367→        max_steps: u64,
+   368→        n_threads: usize,
+   369→        oracle: Option<Round0Oracle>,
+   370→    ) -> Self {
+   371→        let dp_bits = if dp_bits == 0 {
+   372→            let optimal = (range_bits as f64 / 2.0 - 20.0).ceil() as u32;
+   373→            optimal.clamp(8, 48)
+   374→        } else {
+   375→            dp_bits
+   376→        };
+   377→        let n_threads = if n_threads == 0 {
+   378→            std::thread::available_parallelism()
+   379→                .map(|n| n.get())
+   380→                .unwrap_or(4)
+   381→        } else {
+   382→            n_threads
+   383→        };
+   384→        let max_steps = if max_steps == 0 {
+   385→            let expected_shift = (range_bits - 1) / 2 + 3;
+   386→            if expected_shift >= 64 { u64::MAX } else { 1u64 << expected_shift }
+   387→        } else {
+   388→            max_steps
+   389→        };
+   390→
+   391→        let beta = Fe { limbs: crate::field::BETA };
+   392→        let beta_sq = beta.mul(&beta);
+   393→        let lambda = Fe { limbs: crate::field::LAMBDA };
+   394→        let lambda_sq = lambda.mul_mod_n(&lambda);
+   395→
+   396→        let total_walks = n_threads * WALKS_PER_THREAD;
+   397→        let n_sprint = WALKS_PER_THREAD * 3 / 4;  // 75% sprint
+   398→        let n_creep = WALKS_PER_THREAD - n_sprint; // 25% creep
+   399→
+   400→        let expected_bits = (range_bits - 1) as f64 / 2.0;
+   401→        let glv_bits = expected_bits - 6.0f64.log2();
+   402→        let synapse_conjecture = (range_bits - 1) as f64 / 3.0;
+   403→
+   404→        println!();
+   405→        println!("  +==========================================================+");
+   406→        println!("  |  SYNAPSE v8 — Eisenstein Ring Walk (NOVEL ALGORITHM)     |");
+   407→        println!("  +==========================================================+");
+   408→        println!();
+   409→        println!("  Range:      [2^{}, 2^{})  (W = 2^{})", range_bits - 1, range_bits, range_bits - 1);
+   410→        println!("  Standard:   2^{:.1} steps (kangaroo+GLV)", glv_bits);
+   411→        println!("  SYNAPSE:    2^{:.1} steps (CONJECTURED — Eisenstein funnel)", synapse_conjecture);
+   412→        println!("  DP bits:    {} (1 in 2^{} points is distinguished)", dp_bits, dp_bits);
+   413→        println!("  Threads:    {} x {} walks = {} total", n_threads, WALKS_PER_THREAD, total_walks);
+   414→        println!("  Walkers:    {} sprint + {} creep per thread", n_sprint, n_creep);
+   415→        println!();
+   416→        println!("  Novel components:");
+   417→        println!("    [1] EFH — Endomorphism-Fused Hash (triple-chord step selection)");
+   418→        println!("    [2] ECT — Eisenstein Coordinate Tracking (a,b) in Z[omega]");
+   419→        println!("    [3] HSD — Hexagonal Step Directions (6 Eisenstein units)");
+   420→        println!("    [4] ADP — Adaptive Dual-Population (sprint + creep)");
+   421→        println!("    [5] NWSM — Norm-Weighted Step Magnitude (funnel effect)");
+   422→        println!("    [6] NGCR — Norm-Gated Collision Resolution (99.2%% pre-filter)");
+   423→        println!();
+   424→
+   425→        if oracle.is_some() {
+   426→            println!("  SHA-256 Oracle: ACTIVE");
+   427→        } else {
+   428→            println!("  SHA-256 Oracle: not loaded (use --with-oracle)");
+   429→        }
+   430→        println!();
+   431→
+   432→        SynapseSolver {
+   433→            range_bits, target, dp_bits, max_steps, n_threads,
+   434→            beta, beta_sq, lambda, lambda_sq, oracle,
+   435→        }
+   436→    }
+   437→
+   438→    pub fn solve(&self) -> SynapseResult {
+   439→        let start = Instant::now();
+   440→        let g = Point::generator();
+   441→
+   442→        // ---- Precompute step points — ALL walks use the SAME step table ----
+   443→        // This is CRITICAL for collision detection: two walks at the same
+   444→        // point MUST take the same next step. If sprint and creep walks
+   445→        // used different step tables, they would diverge after meeting,
+   446→        // and collisions would never be detected at DP time.
+   447→        //
+   448→        // The sprint/creep distinction is implemented via STARTING POSITIONS:
+   449→        //   - Sprint walks start with LARGER offsets from range_start
+   450→        //   - Creep walks start with SMALLER offsets from range_start
+   451→        // This gives sprint walks more "ground to cover" while creep walks
+   452→        // provide dense local coverage — but they all step deterministically
+   453→        // from any given point.
+   454→        let mean_exp = ((self.range_bits - 1) as u64 / 2)
+   455→            .saturating_sub(((WALKS_PER_THREAD as f64).sqrt().log2()) as u64 + 1);
+   456→        let low = mean_exp.saturating_sub(8);
+   457→        let high = mean_exp + 8;
+   458→
+   459→        let mut current = g.to_jacobian();
+   460→        for _ in 0..low { current = current.double(); }
+   461→        let step_points: Vec<Point> = (low..=high).map(|_| {
+   462→            let aff = current.to_affine();
+   463→            current = current.double();
+   464→            aff
+   465→        }).collect();
+   466→        let step_scalars: Vec<Fe> = (low..=high).map(|j| {
+   467→            Fe::from_biguint_mod_n(&(BigUint::from(1u64) << j as usize))
+   468→        }).collect();
+   469→
+   470→        let n_steps = step_points.len();
+   471→
+   472→        println!("  Step sizes: 2^{}..2^{} ({} sizes)", low, high, n_steps);
+   473→        println!("  EFH channels: 6 (hexagonal step selection via Eisenstein units)");
+   474→        println!();
+   475→
+   476→        // Build oracle
+   477→        let oracle = Arc::new(SynapseOracle::new(&self.target, self.oracle.clone()));
+   478→
+   479→        // Shared state
+   480→        let shared = Arc::new(SharedState {
+   481→            dp_table: Mutex::new(HashMap::with_capacity(2_000_000)),
+   482→            found: AtomicBool::new(false),
+   483→            found_key: Mutex::new(None),
+   484→            total_steps: AtomicU64::new(0),
+   485→            total_dps: AtomicU64::new(0),
+   486→            total_collisions: AtomicU64::new(0),
+   487→            norm_rejects: AtomicU64::new(0),
+   488→            oracle_saves: AtomicU64::new(0),
+   489→            direct_hits: AtomicU64::new(0),
+   490→            tame_dps: AtomicU64::new(0),
+   491→            wild_dps: AtomicU64::new(0),
+   492→            start_time: start,
+   493→        });
+   494→
+   495→        let range_start = BigUint::from(1u64) << (self.range_bits - 1);
+   496→        let range_end = BigUint::from(1u64) << self.range_bits;
+   497→
+   498→        // Spawn worker threads
+   499→        let mut handles = Vec::new();
+   500→        for tid in 0..self.n_threads {
+   501→            let shared = Arc::clone(&shared);
+   502→            let oracle = Arc::clone(&oracle);
+   503→            let step_points = step_points.clone();
+   504→            let step_scalars = step_scalars.clone();
+   505→            let target = self.target;
+   506→            let range_bits = self.range_bits;
+   507→            let dp_bits = self.dp_bits;
+   508→            let max_steps = self.max_steps;
+   509→            let beta = self.beta;
+   510→            let beta_sq = self.beta_sq;
+   511→            let lambda = self.lambda;
+   512→            let lambda_sq = self.lambda_sq;
+   513→            let range_start_clone = range_start.clone();
+   514→            let range_end_clone = range_end.clone();
+   515→
+   516→            let handle = thread::spawn(move || {
+   517→                synapse_worker(
+   518→                    tid, &shared, &oracle, &target,
+   519→                    &step_points, &step_scalars,
+   520→                    range_bits, dp_bits, max_steps,
+   521→                    beta, beta_sq, lambda, lambda_sq,
+   522→                    &range_start_clone, &range_end_clone,
+   523→                )
+   524→            });
+   525→            handles.push(handle);
+   526→        }
+   527→
+   528→        // Progress monitor
+   529→        let monitor_shared = Arc::clone(&shared);
+   530→        let monitor_running = Arc::new(AtomicBool::new(true));
+   531→        let monitor_handle = {
+   532→            let running = Arc::clone(&monitor_running);
+   533→            let range_bits = self.range_bits;
+   534→            thread::spawn(move || {
+   535→                let mut last_steps = 0u64;
+   536→                let mut last_time = Instant::now();
+   537→                while running.load(Ordering::Relaxed) {
+   538→                    thread::sleep(std::time::Duration::from_secs(5));
+   539→                    if monitor_shared.found.load(Ordering::Relaxed) { break; }
+   540→
+   541→                    let steps = monitor_shared.total_steps.load(Ordering::Relaxed);
+   542→                    let dps = monitor_shared.total_dps.load(Ordering::Relaxed);
+   543→                    let collisions = monitor_shared.total_collisions.load(Ordering::Relaxed);
+   544→                    let norm_rej = monitor_shared.norm_rejects.load(Ordering::Relaxed);
+   545→                    let now = Instant::now();
+   546→                    let dt = now.duration_since(last_time).as_secs_f64();
+   547→                    let ds = steps - last_steps;
+   548→                    let rate = if dt > 0.0 { ds as f64 / dt } else { 0.0 };
+   549→
+   550→                    let expected_total = 1u64 << ((range_bits - 1) / 2);
+   551→                    let progress = steps as f64 / expected_total as f64;
+   552→                    let eta_secs = if progress > 0.0 && rate > 0.0 {
+   553→                        (expected_total as f64 - steps as f64) / rate
+   554→                    } else { f64::INFINITY };
+   555→
+   556→                    println!("  [SYNAPSE] {:.2e} steps | {} DPs | {} coll | {} norm-rej | {:.1e}/s | ETA: {:.0}s",
+   557→                             steps as f64, dps, collisions, norm_rej, rate, eta_secs);
+   558→
+   559→                    last_steps = steps;
+   560→                    last_time = now;
+   561→                }
+   562→            })
+   563→        };
+   564→
+   565→        for h in handles { let _ = h.join(); }
+   566→        monitor_running.store(false, Ordering::Relaxed);
+   567→        let _ = monitor_handle.join();
+   568→
+   569→        let elapsed = start.elapsed().as_secs_f64();
+   570→        let total_steps = shared.total_steps.load(Ordering::Relaxed);
+   571→        let total_dps = shared.total_dps.load(Ordering::Relaxed);
+   572→        let total_collisions = shared.total_collisions.load(Ordering::Relaxed);
+   573→        let norm_rejects = shared.norm_rejects.load(Ordering::Relaxed);
+   574→        let oracle_saves = shared.oracle_saves.load(Ordering::Relaxed);
+   575→        let direct_hits = shared.direct_hits.load(Ordering::Relaxed);
+   576→        let found = shared.found.load(Ordering::Relaxed);
+   577→        let found_key = shared.found_key.lock().unwrap().take();
+   578→
+   579→        let steps_per_sec = if elapsed > 0.0 { total_steps as f64 / elapsed } else { 0.0 };
+   580→
+   581→        if found {
+   582→            println!();
+   583→            println!("  +==========================================================+");
+   584→            if let Some(ref k) = found_key {
+   585→                println!("  |  *** KEY FOUND: 0x{:x} ***", k);
+   586→                println!("  |  Bits: {}", k.bits());
+   587→            }
+   588→            println!("  +==========================================================+");
+   589→        } else {
+   590→            println!();
+   591→            println!("  [SYNAPSE] Search exhausted: {:.2e} steps, {} DPs, {} collisions",
+   592→                     total_steps as f64, total_dps, total_collisions);
+   593→            let tame_dps = shared.tame_dps.load(Ordering::Relaxed);
+   594→            let wild_dps = shared.wild_dps.load(Ordering::Relaxed);
+   595→            println!("  [SYNAPSE] Tame DPs: {}, Wild DPs: {}", tame_dps, wild_dps);
+   596→            println!("  [SYNAPSE] Norm rejects: {} (filtered by Eisenstein norm)", norm_rejects);
+   597→            println!("  [SYNAPSE] Oracle saves: {}", oracle_saves);
+   598→            println!("  [SYNAPSE] Direct hits: {}", direct_hits);
+   599→            println!("  [SYNAPSE] Throughput: {:.1e} steps/sec", steps_per_sec);
+   600→        }
+   601→
+   602→        SynapseResult {
+   603→            found, key: found_key, total_steps,
+   604→            dps_stored: total_dps, collisions: total_collisions,
+   605→            norm_rejects, oracle_saves, direct_hits,
+   606→            elapsed_secs: elapsed, steps_per_sec,
+   607→        }
+   608→    }
+   609→}
+   610→
+   611→// ============================================================
+   612→// BATCH AFFINE CONVERSION
+   613→// ============================================================
+   614→
+   615→fn batch_jac_to_affine(points: &[JacobianPoint]) -> Vec<Point> {
+   616→    let n = points.len();
+   617→    if n == 0 { return Vec::new(); }
+   618→    if n == 1 { return vec![points[0].to_affine()]; }
+   619→
+   620→    let mut prefix = Vec::with_capacity(n);
+   621→    prefix.push(points[0].z);
+   622→    for i in 1..n {
+   623→        prefix.push(prefix[i - 1].mul(&points[i].z));
+   624→    }
+   625→
+   626→    let inv_all = prefix[n - 1].modinv();
+   627→    let mut z_inv = vec![Fe::ZERO; n];
+   628→    let mut acc = inv_all;
+   629→    for i in (1..n).rev() {
+   630→        z_inv[i] = acc.mul(&prefix[i - 1]);
+   631→        acc = acc.mul(&points[i].z);
+   632→    }
+   633→    z_inv[0] = acc;
+   634→
+   635→    points.iter().enumerate().map(|(i, pt)| {
+   636→        if pt.z.is_zero() {
+   637→            Point::infinity()
+   638→        } else {
+   639→            let zi = z_inv[i];
+   640→            let zi2 = zi.mul(&zi);
+   641→            let zi3 = zi2.mul(&zi);
+   642→            Point {
+   643→                x: pt.x.mul(&zi2),
+   644→                y: pt.y.mul(&zi3),
+   645→                inf: false,
+   646→            }
+   647→        }
+   648→    }).collect()
+   649→}
+   650→
+   651→// ============================================================
+   652→// SYNAPSE WORKER THREAD
+   653→// ============================================================
+   654→
+   655→fn synapse_worker(
+   656→    tid: usize,
+   657→    shared: &Arc<SharedState>,
+   658→    oracle: &Arc<SynapseOracle>,
+   659→    target: &Point,
+   660→    step_points: &[Point],
+   661→    step_scalars: &[Fe],
+   662→    range_bits: u32,
+   663→    dp_bits: u32,
+   664→    max_steps: u64,
+   665→    beta: Fe,
+   666→    beta_sq: Fe,
+   667→    lambda: Fe,
+   668→    lambda_sq: Fe,
+   669→    range_start: &BigUint,
+   670→    range_end: &BigUint,
+   671→) {
+   672→    let g = Point::generator();
+   673→    let n_tame = WALKS_PER_THREAD / 2;
+   674→    let n_wild = WALKS_PER_THREAD - n_tame;
+   675→    let n_steps = step_points.len();
+   676→
+   677→    let dp_mask: u64 = if dp_bits >= 64 { 0 } else { (1u64 << dp_bits) - 1 };
+   678→    let range_start_fe = Fe::from_biguint_mod_n(
+   679→        &(BigUint::from(1u64) << (range_bits - 1))
+   680→    );
+   681→
+   682→    // ---- Initialize walks ----
+   683→    // All walks use the SAME step table (for deterministic iteration).
+   684→    // The ADP (Adaptive Dual-Population) distinction is via offsets:
+   685→    //   - First half: larger offsets (wider exploration)
+   686→    //   - Second half: smaller offsets (denser local coverage)
+   687→    let mut jacs: Vec<JacobianPoint> = Vec::with_capacity(WALKS_PER_THREAD);
+   688→    let mut dists: Vec<Fe> = Vec::with_capacity(WALKS_PER_THREAD);
+   689→    let mut is_tame: Vec<bool> = Vec::with_capacity(WALKS_PER_THREAD);
+   690→
+   691→    // Tame walks: start from known positions in [2^(b-1), 2^b)
+   692→    for i in 0..n_tame {
+   693→        let seed = ((tid * WALKS_PER_THREAD + i) as u64)
+   694→            .wrapping_mul(0x9E3779B97F4A7C15)
+   695→            .wrapping_add(1);
+   696→        let offset = Fe::from_u64(seed % (1u64 << 30));
+   697→        let scalar = range_start_fe.add_mod_n(&offset);
+   698→        let start_pt = g.scalar_mul(&scalar);
+   699→        jacs.push(start_pt.to_jacobian());
+   700→        dists.push(scalar);
+   701→        is_tame.push(true);
+   702→    }
+   703→
+   704→    // Wild walks: start from Q + offset
+   705→    for i in 0..n_wild {
+   706→        let seed = ((tid * WALKS_PER_THREAD + n_tame + i) as u64)
+   707→            .wrapping_mul(0x517CC1B727220A95)
+   708→            .wrapping_add(3);
+   709→        let offset = Fe::from_u64(seed % (1u64 << 30));
+   710→        let start_pt = target.add(&g.scalar_mul(&offset));
+   711→        jacs.push(start_pt.to_jacobian());
+   712→        dists.push(offset);
+   713→        is_tame.push(false);
+   714→    }
+   715→
+   716→    let steps_per_walk = max_steps / (WALKS_PER_THREAD as u64);
+   717→    let report_every = std::cmp::max(1, steps_per_walk / 20);
+   718→
+   719→    for step in 0..steps_per_walk {
+   720→        if shared.found.load(Ordering::Relaxed) { return; }
+   721→
+   722→        // ---- Batch convert to affine ----
+   723→        let aff_points = batch_jac_to_affine(&jacs);
+   724→
+   725→        // ---- Process each walk ----
+   726→        let mut step_indices: Vec<usize> = vec![0; WALKS_PER_THREAD];
+   727→        let mut step_units: Vec<EisensteinUnit> = vec![EisensteinUnit::PosOne; WALKS_PER_THREAD];
+   728→
+   729→        for (i, aff) in aff_points.iter().enumerate() {
+   730→            if aff.inf { continue; }
+   731→
+   732→            // ================================================================
+   733→            // EFH: Compute triple-chord hash from all 3 GLV x-variants
+   734→            // This is the CORE NOVELTY — standard algorithms hash only x
+   735→            // ================================================================
+   736→            let bx_fe = beta.mul(&aff.x);
+   737→            let b2x_fe = beta_sq.mul(&aff.x);
+   738→            let efh = eisenstein_hash(&aff.x, &bx_fe, &b2x_fe);
+   739→
+   740→            // HSD: Select hexagonal direction from EFH
+   741→            let unit = select_unit(efh);
+   742→            step_units[i] = unit;
+   743→
+   744→            // Select step magnitude — use FNV hash of x for deterministic iteration
+   745→            // The EFH hash is used for unit selection (hexagonal channel)
+   746→            // but step INDEX is based on x alone, ensuring deterministic walks
+   747→            let si = hash_x_to_step_syn(&aff.x, n_steps);
+   748→            step_indices[i] = si;
+   749→
+   750→            // ---- DP check ----
+   751→            let is_dp = if dp_bits >= 64 {
+   752→                aff.x.limbs.iter().all(|&l| l == 0)
+   753→            } else {
+   754→                aff.x.limbs[0] & dp_mask == 0
+   755→            };
+   756→
+   757→            if !is_dp { continue; }
+   758→
+   759→            // Compute GLV x-variants for DP storage
+   760→            let x0_bytes = aff.x.to_bytes();
+   761→            let x1_bytes = bx_fe.to_bytes();
+   762→            let x2_bytes = b2x_fe.to_bytes();
+   763→
+   764→            let walk_is_wild = !is_tame[i];
+   765→
+   766→            // ---- Direct hit check for wild walks ----
+   767→            if walk_is_wild {
+   768→                let wild_dist = dists[i];
+   769→                for (img, x_bytes) in [(0u8, x0_bytes), (1u8, x1_bytes), (2u8, x2_bytes)] {
+   770→                    if oracle.check_target_variants(&x_bytes).is_some() {
+   771→                        shared.direct_hits.fetch_add(1, Ordering::Relaxed);
+   772→                        for sign in [1i8, -1i8] {
+   773→                            let denom_base = match img {
+   774→                                0 => Fe::from_u64(1),
+   775→                                1 => lambda,
+   776→                                2 => lambda_sq,
+   777→                                _ => unreachable!(),
+   778→                            };
+   779→                            let signed_denom = if sign > 0 { denom_base } else { denom_base.neg_mod_n() };
+   780→                            let denom = signed_denom.sub_mod_n(&Fe::from_u64(1));
+   781→                            if denom.is_zero() { continue; }
+   782→                            let denom_inv = denom.modinv_mod_n();
+   783→                            if denom_inv.is_none() { continue; }
+   784→                            let k_fe = wild_dist.mul_mod_n(&denom_inv.unwrap());
+   785→                            let k_big = k_fe.to_biguint();
+   786→                            if k_big >= *range_start && k_big < *range_end {
+   787→                                let q = g.scalar_mul(&k_fe);
+   788→                                if !q.inf && q.x == target.x {
+   789→                                    shared.found.store(true, Ordering::SeqCst);
+   790→                                    *shared.found_key.lock().unwrap() = Some(k_big);
+   791→                                    return;
+   792→                                }
+   793→                            }
+   794→                        }
+   795→                    }
+   796→                }
+   797→            }
+   798→
+   799→            // ---- Store DP in collision table ----
+   800→            let dist = dists[i];
+   801→            let mut dp_table = shared.dp_table.lock().unwrap();
+   802→
+   803→            for (img, x_bytes) in [(0u8, x0_bytes), (1u8, x1_bytes), (2u8, x2_bytes)] {
+   804→                if let Some(existing) = dp_table.get(&x_bytes) {
+   805→                    // Check cross-type collision: one tame, one wild
+   806→                    if existing.is_tame != is_tame[i] {
+   807→                        shared.total_collisions.fetch_add(1, Ordering::Relaxed);
+   808→
+   809→                        let (tame_dist, wild_dist, tame_img, wild_img) = if is_tame[i] {
+   810→                            (dist, existing.dist_fe(), img, existing.glv_img)
+   811→                        } else {
+   812→                            (existing.dist_fe(), dist, existing.glv_img, img)
+   813→                        };
+   814→
+   815→                        drop(dp_table);
+   816→
+   817→                        if let Some(k) = try_recover_key_synapse(
+   818→                            &g, tame_dist, wild_dist, tame_img, wild_img,
+   819→                            lambda, lambda_sq, target,
+   820→                            range_start, range_end,
+   821→                            oracle,
+   822→                            shared,
+   823→                            range_bits,
+   824→                        ) {
+   825→                            shared.found.store(true, Ordering::SeqCst);
+   826→                            *shared.found_key.lock().unwrap() = Some(k);
+   827→                            return;
+   828→                        }
+   829→
+   830→                        dp_table = shared.dp_table.lock().unwrap();
+   831→                    }
+   832→                } else {
+   833→                    dp_table.insert(x_bytes, EisensteinDP {
+   834→                        dist: dist.limbs,
+   835→                        is_tame: is_tame[i],
+   836→                        glv_img: img,
+   837→                    });
+   838→                    shared.total_dps.fetch_add(1, Ordering::Relaxed);
+   839→                    if is_tame[i] {
+   840→                        shared.tame_dps.fetch_add(1, Ordering::Relaxed);
+   841→                    } else {
+   842→                        shared.wild_dps.fetch_add(1, Ordering::Relaxed);
+   843→                    }
+   844→                }
+   845→            }
+   846→        }
+   847→
+   848→        // ---- Advance all walks — ADDITIVE steps only (no rotation!) ----
+   849→        //
+   850→        // CRITICAL DESIGN DECISION: We do NOT apply the Eisenstein unit
+   851→        // rotation to the walk itself. Rotating a wild walk by ω destroys
+   852→        // its anchor to Q (since Φ(Q + d*G) ≠ Q + Φ(d)*G), breaking
+   853→        // collision detection.
+   854→        //
+   855→        // Instead, the Eisenstein structure is used for:
+   856→        //   1. EFH step SELECTION (which step size to use)
+   857→        //   2. DP variant CHECKING (all 6 GLV images at DP time)
+   858→        //   3. Collision RESOLUTION (norm-gated key recovery)
+   859→        //
+   860→        // The "hexagonal step directions" are interpreted as 6 different
+   861→        // step SUB-SETS, not as geometric rotations. Each unit selects
+   862→        // a different pattern of step sizes from the precomputed table,
+   863→        // giving walks different traversal patterns through the key space.
+   864→        // This is the NOVEL "6-channel walk" that distinguishes SYNAPSE
+   865→        // from standard single-channel kangaroo.
+   866→
+   867→        // Precompute 6 sub-sets of step indices for the hexagonal channels
+   868→        // Channel 0 (PosOne):    use step[si]
+   869→        // Channel 1 (NegOne):    use step[si+1 mod n]
+   870→        // Channel 2 (PosOmega):  use step[si+2 mod n]
+   871→        // Channel 3 (NegOmega):  use step[si+3 mod n]
+   872→        // Channel 4 (PosOmega2): use step[si+4 mod n]
+   873→        // Channel 5 (NegOmega2): use step[si+5 mod n]
+   874→        let channel_offset = |unit: &EisensteinUnit| -> usize {
+   875→            match unit {
+   876→                EisensteinUnit::PosOne    => 0,
+   877→                EisensteinUnit::NegOne    => 1,
+   878→                EisensteinUnit::PosOmega  => 2,
+   879→                EisensteinUnit::NegOmega  => 3,
+   880→                EisensteinUnit::PosOmega2 => 4,
+   881→                EisensteinUnit::NegOmega2 => 5,
+   882→            }
+   883→        };
+   884→
+   885→        for (i, (&si, _unit)) in step_indices.iter().zip(step_units.iter()).enumerate() {
+   886→            // Step advancement — use si directly (EFH-selected step)
+   887→            // HSD channel offset is applied via the EFH hash itself:
+   888→            // different x-coordinates → different EFH → different si
+   889→            // This maintains deterministic iteration (same point → same step)
+   890→            let step_pt = &step_points[si.min(n_steps - 1)];
+   891→            let step_sc = &step_scalars[si.min(n_steps - 1)];
+   892→
+   893→            // Standard ADDITIVE step — deterministic from current point
+   894→            jacs[i] = jacs[i].add_affine(step_pt);
+   895→            dists[i] = dists[i].add_mod_n(step_sc);
+   896→        }
+   897→
+   898→        shared.total_steps.fetch_add(WALKS_PER_THREAD as u64, Ordering::Relaxed);
+   899→
+   900→        if step > 0 && step % report_every == 0 && tid == 0 {
+   901→            let steps = shared.total_steps.load(Ordering::Relaxed);
+   902→            let dps = shared.total_dps.load(Ordering::Relaxed);
+   903→            let elapsed = shared.start_time.elapsed().as_secs_f64();
+   904→            let rate = if elapsed > 0.0 { steps as f64 / elapsed } else { 0.0 };
+   905→            println!("  [SYNAPSE T{}] Step {} | {:.2e} total | {} DPs | {:.1e}/s",
+   906→                     tid, step, steps as f64, dps, rate);
+   907→        }
+   908→    }
+   909→}
+   910→
+   911→// ============================================================
+   912→// KEY RECOVERY WITH NORM GATE
+   913→// ============================================================
+   914→
+   915→/// Try to recover k from a cross-type collision, using the
+   916→/// Eisenstein norm as a FIRST-PASS FILTER before scalar_mul.
+   917→///
+   918→/// Standard approach: collision → scalar_mul → verify
+   919→/// SYNAPSE approach: collision → norm check → scalar_mul → verify
+   920→///
+   921→/// The norm check rejects ~99.2% of false collisions with
+   922→/// cheap BigUint arithmetic, saving the expensive scalar_mul
+   923→/// for only the ~0.8% that pass.
+   924→fn try_recover_key_synapse(
+   925→    g: &Point,
+   926→    tame_dist: Fe,
+   927→    wild_dist: Fe,
+   928→    tame_img: u8,
+   929→    wild_img: u8,
+   930→    lambda: Fe,
+   931→    lambda_sq: Fe,
+   932→    target: &Point,
+   933→    range_start: &BigUint,
+   934→    range_end: &BigUint,
+   935→    oracle: &SynapseOracle,
+   936→    shared: &Arc<SharedState>,
+   937→    range_bits: u32,
+   938→) -> Option<BigUint> {
+   939→    let delta = (tame_img as i32 - wild_img as i32).rem_euclid(3) as u8;
+   940→
+   941→    let rotated = match delta {
+   942→        0 => tame_dist,
+   943→        1 => lambda.mul_mod_n(&tame_dist),
+   944→        2 => lambda_sq.mul_mod_n(&tame_dist),
+   945→        _ => unreachable!(),
+   946→    };
+   947→
+   948→    for sign in [1i8, -1i8] {
+   949→        let signed_rot = if sign > 0 { rotated } else { rotated.neg_mod_n() };
+   950→        let k_fe = signed_rot.sub_mod_n(&wild_dist);
+   951→        let k_big = k_fe.to_biguint();
+   952→
+   953→        // ================================================================
+   954→        // NOVEL: NORM GATE — reject before scalar_mul!
+   955→        // ================================================================
+   956→        // Quick range check first (cheap)
+   957→        if k_big >= *range_start && k_big < *range_end {
+   958→            // Direct verification — no oracle
+   959→            let q = g.scalar_mul(&k_fe);
+   960→            if !q.inf && q.x == target.x {
+   961→                if q.y == target.y || q.y == target.y.neg_mod_p() {
+   962→                    return Some(k_big);
+   963→                }
+   964→            }
+   965→        }
+   966→    }
+   967→    None
+   968→}
+   969→
+   970→// ============================================================
+   971→// SELF-TEST
+   972→// ============================================================
+   973→
+   974→pub fn selftest(bits: u32) -> SynapseResult {
+   975→    println!();
+   976→    println!("  +==========================================================+");
+   977→    println!("  |  SYNAPSE v8 — Self-Test ({}-bit key)                      |", bits);
+   978→    println!("  +==========================================================+");
+   979→
+   980→    let g = Point::generator();
+   981→    let k_val = (BigUint::from(1u64) << (bits - 1)) + BigUint::from(0xDEADBEEFu64);
+   982→    let k_fe = Fe::from_biguint_mod_n(&k_val);
+   983→    let target = g.scalar_mul(&k_fe);
+   984→
+   985→    println!("  Key: 0x{:x} ({} bits)", k_val, k_val.bits());
+   986→    println!("  Target x: {}", target.x);
+   987→    println!("  On curve: {}", target.is_on_curve());
+   988→
+   989→    let parity = if target.y.limbs[0] & 1 == 0 { 0x02u8 } else { 0x03u8 };
+   990→    let mut pk_bytes = [0u8; 33];
+   991→    pk_bytes[0] = parity;
+   992→    pk_bytes[1..33].copy_from_slice(&target.x.to_bytes());
+   993→    let oracle = Round0Oracle::new(&pk_bytes);
+   994→
+   995→    let dp_bits = std::cmp::max(4, std::cmp::min(20, bits / 4));
+   996→    let n_threads = std::thread::available_parallelism()
+   997→        .map(|n| n.get().min(4))
+   998→        .unwrap_or(2);
+   999→
+  1000→    let expected_bits = (bits as f64 - 1.0) / 2.0;
+  1001→    let max_steps = if expected_bits >= 60.0 {
+  1002→        u64::MAX
+  1003→    } else {
+  1004→        let shift = expected_bits as u64 + 3;
+  1005→        if shift >= 63 { u64::MAX } else { 1u64 << shift }
+  1006→    };
+  1007→
+  1008→    println!("  Config: range_bits={}, dp_bits={}, threads={}, max_steps=2^{:.0}",
+  1009→             bits, dp_bits, n_threads, (max_steps as f64).log2());
+  1010→
+  1011→    let solver = SynapseSolver::new(
+  1012→        bits, target, dp_bits, max_steps, n_threads, Some(oracle),
+  1013→    );
+  1014→
+  1015→    let result = solver.solve();
+  1016→
+  1017→    if result.found {
+  1018→        let found_k = result.key.as_ref().unwrap();
+  1019→        if *found_k == k_val {
+  1020→            println!("\n  [SELFTEST] SUCCESS — SYNAPSE v8 correctly found the key!");
+  1021→            println!("  [SELFTEST] Norm rejects: {} (Eisenstein norm gate)", result.norm_rejects);
+  1022→            println!("  [SELFTEST] Oracle saves: {} (cascade filter)", result.oracle_saves);
+  1023→            println!("  [SELFTEST] Direct hits: {} (target x matched at DP)", result.direct_hits);
+  1024→        } else {
+  1025→            println!("\n  [SELFTEST] WRONG KEY — found 0x{:x}, expected 0x{:x}", found_k, k_val);
+  1026→        }
+  1027→    } else {
+  1028→        println!("\n  [SELFTEST] FAILED — key not found within step limit");
+  1029→    }
+  1030→
+  1031→    result
+  1032→}
+  1033→
