@@ -252,6 +252,32 @@ impl Fe {
         n.sub(self)
     }
 
+    /// Modular inverse mod N via Fermat: self^(N-2) mod N
+    /// Returns None if self is zero (not invertible).
+    pub fn modinv_mod_n(&self) -> Option<Self> {
+        if self.is_zero() { return None; }
+        // N - 2
+        let exp = Fe { limbs: [
+            0xBFD25E8CD036413F,
+            0xBAAEDCE6AF48A03B,
+            0xFFFFFFFFFFFFFFFE,
+            0xFFFFFFFFFFFFFFFF,
+        ]};
+        // Compute self^exp mod N using square-and-multiply
+        // We use BigUint for modular reduction mod N (no special form)
+        let base_big = self.to_biguint();
+        let n_big = BigUint::parse_bytes(
+            b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16
+        ).unwrap();
+        let exp_big = exp.to_biguint();
+        let result_big = base_big.modpow(&exp_big, &n_big);
+        let r_bytes = result_big.to_bytes_be();
+        let mut arr = [0u8; 32];
+        let start = 32 - r_bytes.len().min(32);
+        arr[start..32].copy_from_slice(&r_bytes[..r_bytes.len().min(32)]);
+        Some(Fe::from_bytes(&arr))
+    }
+
     /// mul mod N — uses BigUint (N has no special form for fast reduction)
     pub fn mul_mod_n(&self, o: &Fe) -> Self {
         let mut prod = [0u64; 8];
@@ -366,6 +392,27 @@ impl Fe {
             0xFFFFFFFFFFFFFFFF,
         ]};
         self.pow(&exp)
+    }
+
+    /// Square root mod P for secp256k1.
+    /// Since P ≡ 3 (mod 4), sqrt(x) = x^((P+1)/4).
+    /// Returns None if x is not a quadratic residue.
+    pub fn sqrt_secp256k1(&self) -> Option<Self> {
+        if self.is_zero() { return Some(Fe::ZERO); }
+        // (P + 1) / 4 = 0x3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFFFF0C
+        let exp = Fe { limbs: [
+            0xFFFFFFFBFFFFF0C,
+            0xFFFFFFFFFFFFFFFF,
+            0xFFFFFFFFFFFFFFFF,
+            0x3FFFFFFFFFFFFFFF,
+        ]};
+        let root = self.pow(&exp);
+        // Verify: root² == self
+        if root.sqr() == *self {
+            Some(root)
+        } else {
+            None
+        }
     }
 
     // ============================================================

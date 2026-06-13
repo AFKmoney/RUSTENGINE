@@ -1,8 +1,8 @@
 [package]
 name = "rustsolver"
-version = "4.0.0"
+version = "11.0.0"
 edition = "2021"
-description = "PRISM VORTEX RUSTSOLVER v4 — GLV-Expanded DPs + Batch Affine + Oracle for Bitcoin Puzzle P135"
+description = "PRISM VORTEX RUSTSOLVER v11 — GLV-Expanded DPs + Batch Affine + Oracle for Bitcoin Puzzle P135"
 
 [dependencies]
 rayon = "1.10"

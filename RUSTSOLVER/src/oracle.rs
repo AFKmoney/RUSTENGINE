@@ -141,6 +141,7 @@ fn reconstruct_x_from_w(w: &[u32; 16]) -> [u8; 32] {
 // ROUND 0 ORACLE
 // ============================================================
 
+#[derive(Clone)]
 pub struct Round0Oracle {
     /// Target x-coordinate (32 bytes)
     pub target_x: [u8; 32],

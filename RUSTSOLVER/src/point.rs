@@ -3,6 +3,7 @@
 
 use crate::field::Fe;
 
+#[allow(dead_code)]
 pub const BETA: [u64; 4] = crate::field::BETA;
 
 #[derive(Clone, Copy, Debug)]
@@ -63,6 +64,7 @@ impl Point {
     /// GLV endomorphism: phi(P) = (beta*x, y)
     /// Since beta^3 = 1 mod P, this maps P to an equivalent point
     /// whose discrete log is lambda * k mod N
+    #[allow(dead_code)]
     pub fn glv_phi(&self) -> Self {
         if self.inf { return *self; }
         let beta = Fe { limbs: BETA };

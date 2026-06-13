@@ -2,3 +2,6 @@
 *.swp
 *.swo
 *~
+tool-results/
+target/
+tool-results/
