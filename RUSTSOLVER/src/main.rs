@@ -209,7 +209,10 @@ fn run_prism(args: Args) {
     println!("  Steps:        {:.2e}", result.steps as f64);
     println!("  DPs:          {}", result.dp_count);
     println!("  Collisions:   {}", result.collisions);
-    println!("  Oracle saved: {}", result.oracle_filtered);
+    println!("  L3 ENS:       {} rejected", result.ens_filtered);
+    println!("  L4 CCO:       {} rejected", result.cco_filtered);
+    println!("  L5 H160:      {} rejected", result.h160_filtered);
+    println!("  L6 SHA:       {} rejected", result.oracle_filtered);
     println!("  Time:         {}ms", result.elapsed_ms);
     println!("  +----------------------------------------------------+");
 }
