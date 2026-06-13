@@ -1,8 +1,8 @@
 [package]
-name = "vortex-gpu"
-version = "4.0.0"
+name = "titan-v16"
+version = "16.2.0"
 edition = "2021"
-description = "VORTEX PRIME v4 — GPU-accelerated cryptanalytic solver for Puzzle #135"
+description = "TITAN V16.2 — 9-Layer Hyperstack ECDLP Solver for Bitcoin Puzzle #135 (FIXED)"
 
 [dependencies]
 rayon = "1.10"

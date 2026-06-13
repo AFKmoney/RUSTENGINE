@@ -1,8 +1,8 @@
 [package]
 name = "rustsolver"
-version = "12.0.0"
+version = "15.0.0"
 edition = "2021"
-description = "PRISM VORTEX V3 RUSTSOLVER v12 — Exact GLV Decomposition + 2D Kangaroo + CUDA + Distributed for Bitcoin Puzzle P135"
+description = "PRISM VORTEX v15 TITAN — 15-Layer Solver: 2D BSGS+GLV+Extended Oracle+Tag BSGS for P135"
 
 [dependencies]
 rayon = "1.10"
@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 
 [features]
 default = []
+cuda = []
 
 [profile.release]
 opt-level = 3

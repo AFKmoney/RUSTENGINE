@@ -1,56 +1,37 @@
-//! VORTEX PRIME v6 — INVENTION: Lattice-Guided Kangaroo (LGK)
+//! TITAN V16.2 — Layer 4: Lattice-Guided Kangaroo (LGK) v3
 //! ================================================================
 //! THE KEY INNOVATION: The kangaroo searches in the REDUCED COEFFICIENT
 //! SPACE defined by the 6D lattice, NOT in the full scalar range.
 //!
-//! After 6D lattice decomposition, any scalar k can be written as:
-//!   k = offset + c₀·s₀ + c₁·s₁ + ... + c₅·s₅  (mod n)
-//! where sᵢ = vᵢ[0] (first component of reduced basis vector i)
-//! and the coefficients cᵢ are BOUNDED by ~n^(1/6) ≈ 2^45.
+//! v3 FIX: Replace cheap mod_inv_2k hash with FULL normalize_x.
+//!   - The cheap hash was NOT representation-invariant — same affine
+//!     point with different Z → different step → walks diverge → 0 collisions!
+//!   - Now uses full field inversion (258 muls) per step — slower but CORRECT.
+//!   - Batch affine optimization will recover speed later.
 //!
-//! In EC terms:
-//!   Q = k·G = offset·G + c₀·(s₀·G) + c₁·(s₁·G) + ... + c₅·(s₅·G)
-//!   Q - offset·G = c₀·P₀ + c₁·P₁ + ... + c₅·P₅
+//! v2 FIX: Track scalar distance as Fe (mod n) instead of i64 coefficients.
+//!   - OLD: CoeffVector { c: [i64; 6] } → OVERFLOWS for P135!
+//!   - NEW: Scalar distance tracked as Fe mod n → NEVER overflows!
 //!
-//! where Pᵢ = sᵢ·G are precomputed points.
-//!
-//! The kangaroo walks in 6D coefficient space:
-//!   - Each hop picks a random dimension i and a step size
-//!   - The EC point moves by: current += step · Pᵢ
-//!   - The coefficient changes by: cᵢ += step
-//!
-//! Expected work: 6 × O(√(2^45)) = O(2^24.7) instead of O(2^67.5)
-//! At 10^6 hops/s: ~25 seconds for P135!
+//! How it works:
+//!   Each hop adds ±(step_val * s_dim) to the scalar distance (mod n).
+//!   The EC point moves by ±(step_val * P_dim) where P_dim = s_dim * G.
+//!   On collision: k = offset + tame_dist - wild_dist (mod n).
 
 use crate::field::Fe;
 use crate::point::{Point, JacobianPoint};
 use crate::glv::GLVDecomposer;
-use num_bigint::BigUint;
 use std::collections::HashMap;
 use std::time::Instant;
 
 /// Number of precomputed step types per dimension
 const STEPS_PER_DIM: usize = 4;
 
-/// Distinguished point mask bits — lower = more DPs but more collision checking
-/// For 120K hops/s with O(2^25) expected work, 8 bits gives ~470 DPs/s
-const DP_MASK_BITS: u32 = 8;
+/// Distinguished point mask bits (adaptive — set in new())
+const DP_MASK_BITS_DEFAULT: u32 = 10;
 
-/// A 6D coefficient vector (scalar distances per dimension)
-#[derive(Clone, Debug)]
-pub struct CoeffVector {
-    pub c: [i64; 6],
-}
-
-impl CoeffVector {
-    pub fn zero() -> Self {
-        CoeffVector { c: [0i64; 6] }
-    }
-
-    pub fn add_step(&mut self, dim: usize, step: i64) {
-        self.c[dim] += step;
-    }
-}
+/// secp256k1 order
+const ORDER_HEX: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141";
 
 /// DP key: 32-byte x-coordinate
 type DPKey = [u8; 32];
@@ -65,17 +46,50 @@ pub struct LatticeKangarooResult {
     pub method: String,
 }
 
-/// The Lattice-Guided Kangaroo solver
+/// Normalize the x-coordinate of a Jacobian point: x = X/Z²
+/// This is the CORRECT way to get a representation-invariant hash.
+/// Cost: 1 field inversion + 2 multiplications ≈ 258 field muls
+#[inline]
+fn normalize_x(point: &JacobianPoint) -> Fe {
+    if point.z.is_zero() {
+        return Fe::ZERO;
+    }
+    let z_inv = point.z.modinv();
+    let z_inv_sq = z_inv.mul(&z_inv);
+    point.x.mul(&z_inv_sq)
+}
+
+/// Hash a Jacobian point to a (dimension, step_type, direction) triple
+/// using FULLY NORMALIZED x-coordinate — CORRECT representation-invariant hash.
+#[inline]
+fn hash_to_step_lgk(point: &JacobianPoint, active_dims: &[usize],
+                     num_step_types: usize, dp_bits: u32) -> (usize, usize, bool, Fe) {
+    if point.z.is_zero() || active_dims.is_empty() {
+        return (active_dims.first().copied().unwrap_or(1), 0, true, Fe::ZERO);
+    }
+
+    // FULL normalization — CORRECT and representation-invariant
+    let x_norm = normalize_x(point);
+
+    let hash = x_norm.limbs[0];
+    let dim_idx = (hash as usize) % active_dims.len();
+    let dim = active_dims[dim_idx];
+    let step_type = ((hash >> 16) as usize) % num_step_types;
+    let positive = (hash >> 32) & 1 == 0;
+
+    (dim, step_type, positive, x_norm)
+}
+
+/// The Lattice-Guided Kangaroo solver v3
 ///
-/// This is the CORE of VORTEX PRIME. It combines:
-/// 1. Lattice decomposition (reduces search space from 2^135 to 6×2^45)
-/// 2. Kangaroo search in 6D coefficient space (reduces 6×2^45 to 6×O(2^22.5))
-/// 3. Oracle integration (eliminates false positives)
-/// 4. GLV automorphisms (6x speedup)
+/// Tracks scalar distance as Fe (mod n) — NO i64 OVERFLOW!
+/// Uses FULL normalize_x for step selection — CORRECT deterministic walk!
 ///
-/// Total expected work for P135: O(2^24.7) ≈ 25M hops
-/// At 121K hops/s: ~3.5 minutes
-/// At 10^6 hops/s: ~25 seconds
+/// Algorithm:
+///   Tame kangaroo: starts at offset·G, distance = 0 (mod n)
+///   Wild kangaroo: starts at Q, distance = 0 (mod n)
+///   Each hop: point += ±step_point, distance += ±step_scalar_dist (mod n)
+///   On DP collision: k = offset + tame_dist - wild_dist (mod n)
 pub struct LatticeKangaroo {
     /// Generator point
     pub g: Point,
@@ -96,24 +110,26 @@ pub struct LatticeKangaroo {
     /// GLV decomposer for automorphism checks
     pub glv: GLVDecomposer,
 
-    /// Step sizes per dimension (signed, as i64)
-    /// For dimension i, steps are: ±2^b where b depends on the component size
-    pub step_sizes: [[i64; STEPS_PER_DIM]; 6],
-    /// Step points: step_sizes[dim][step_type] * basis_points[dim] (as affine for mixed add)
-    pub step_points: [[Point; STEPS_PER_DIM]; 6],
+    /// Step EC points (+direction) for each (dim, step_type): step_val · P_dim
+    pub step_points_pos: [[Point; STEPS_PER_DIM]; 6],
+    /// Step EC points (-direction) for each (dim, step_type): -step_val · P_dim
+    pub step_points_neg: [[Point; STEPS_PER_DIM]; 6],
+    /// Step scalar distances (+direction) for each (dim, step_type): step_val · s_dim (mod n)
+    pub step_dists_pos: [[Fe; STEPS_PER_DIM]; 6],
+    /// Step scalar distances (-direction): n - step_val · s_dim (mod n)
+    pub step_dists_neg: [[Fe; STEPS_PER_DIM]; 6],
 
     /// Maximum coefficient per dimension (for range checking)
     pub max_coeff: [u64; 6],
+    /// Active dimensions (bits > 0)
+    pub active_dims: Vec<usize>,
+
+    /// DP mask bits (adaptive)
+    pub dp_bits: u32,
 }
 
 impl LatticeKangaroo {
     /// Create a new LatticeKangaroo from the lattice decomposition results.
-    ///
-    /// Parameters:
-    /// - target_point: Q = k·G (the public key)
-    /// - basis_scalars: sᵢ = vᵢ[0] for each reduced basis vector
-    /// - offset_scalar: the range center (k ≈ offset + Σ cᵢ·sᵢ)
-    /// - max_coeff_bits: approximate bit size of each coefficient
     pub fn new(
         target_point: Point,
         basis_scalars: [Fe; 6],
@@ -121,32 +137,73 @@ impl LatticeKangaroo {
         max_coeff_bits: [u32; 6],
     ) -> Self {
         let g = Point::generator();
-        let n = Fe::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+        let n = Fe::from_hex(ORDER_HEX);
         let glv = GLVDecomposer::new();
 
         // Precompute basis points: Pᵢ = sᵢ · G
         let basis_points: [Point; 6] = std::array::from_fn(|i| {
-            let p = g.scalar_mul(&basis_scalars[i]);
-            assert!(p.is_on_curve(), "basis point {} not on curve!", i);
-            p
+            if basis_scalars[i].is_zero() {
+                Point::infinity()
+            } else {
+                let p = g.scalar_mul(&basis_scalars[i]);
+                assert!(p.is_on_curve() || p.inf, "basis point {} not on curve!", i);
+                p
+            }
         });
 
         // Precompute offset point: offset · G
         let offset_point = g.scalar_mul(&offset_scalar);
         assert!(offset_point.is_on_curve(), "offset point not on curve!");
 
-        // Compute step sizes for each dimension
-        // Optimal mean step ≈ √(max_range) / 2
-        let mut step_sizes: [[i64; STEPS_PER_DIM]; 6] = [[0i64; STEPS_PER_DIM]; 6];
-        let mut step_points: [[Point; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
+        // Find active dimensions
+        let active_dims: Vec<usize> = (0..6)
+            .filter(|&i| max_coeff_bits[i] > 0 && !basis_scalars[i].is_zero())
+            .collect();
+
+        println!("  [LGK] Active dimensions: {:?}", active_dims);
+
+        // Choose DP bits based on total search space
+        let total_bits: u32 = max_coeff_bits.iter().sum();
+        let dp_bits = if total_bits > 80 {
+            28  // For P135: ~2^28 → manageable DP table
+        } else if total_bits > 50 {
+            16
+        } else if total_bits > 30 {
+            8
+        } else {
+            4
+        };
+
+        // Compute step sizes and precompute BOTH directions for each step
+        let mut step_points_pos: [[Point; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
             std::array::from_fn(|_| Point::infinity())
+        });
+        let mut step_points_neg: [[Point; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
+            std::array::from_fn(|_| Point::infinity())
+        });
+        let mut step_dists_pos: [[Fe; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
+            std::array::from_fn(|_| Fe::ZERO)
+        });
+        let mut step_dists_neg: [[Fe; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
+            std::array::from_fn(|_| Fe::ZERO)
         });
         let mut max_coeff: [u64; 6] = [0u64; 6];
 
         for dim in 0..6 {
             let bits = max_coeff_bits[dim];
-            // If bits is very small (< 20), the component is already tiny
-            // Use steps from 2^(bits/2 - 2) to 2^(bits/2 + 1)
+
+            if bits == 0 || basis_scalars[dim].is_zero() {
+                for j in 0..STEPS_PER_DIM {
+                    step_points_pos[dim][j] = Point::infinity();
+                    step_points_neg[dim][j] = Point::infinity();
+                    step_dists_pos[dim][j] = Fe::ZERO;
+                    step_dists_neg[dim][j] = Fe::ZERO;
+                }
+                max_coeff[dim] = 0;
+                continue;
+            }
+
+            // Optimal mean step ≈ √(max_range) / 2
             let base_step = if bits > 10 {
                 (bits / 2).saturating_sub(2) as usize
             } else {
@@ -155,112 +212,108 @@ impl LatticeKangaroo {
 
             for j in 0..STEPS_PER_DIM {
                 let step_bits = base_step + j;
-                let step_val = 1i64 << step_bits;
-                step_sizes[dim][j] = step_val;
+                let step_val = 1u64 << step_bits.min(63);
 
-                // Precompute step_val · Pᵢ as affine point
-                let step_scalar = Fe::from_u64(step_val as u64);
-                step_points[dim][j] = basis_points[dim].scalar_mul(&step_scalar);
+                // Precompute step_val · P_dim (positive direction)
+                let step_scalar = Fe::from_u64(step_val);
+                let step_pt = basis_points[dim].scalar_mul(&step_scalar);
+                step_points_pos[dim][j] = step_pt;
+
+                // Negative direction = negation of the positive point
+                step_points_neg[dim][j] = step_points_pos[dim][j].neg();
+
+                // Scalar distance: step_val · s_dim (mod n) — positive
+                let dist_pos = step_scalar.mul_mod_n(&basis_scalars[dim]);
+                step_dists_pos[dim][j] = dist_pos;
+
+                // Negative direction distance: n - dist_pos (mod n)
+                step_dists_neg[dim][j] = dist_pos.neg_mod_n();
             }
 
-            // Max coefficient: 2^bits (but cap at 2^62 for i64 safety)
-            max_coeff[dim] = if bits < 62 { 1u64 << bits } else { 1u64 << 62 };
+            max_coeff[dim] = if bits < 63 { 1u64 << bits } else { 1u64 << 62 };
 
-            println!("  [LGK] dim {}: bits={}, steps=[2^{}..2^{}], max={}",
-                     dim, bits, base_step, base_step + STEPS_PER_DIM - 1, max_coeff[dim]);
+            println!("  [LGK] dim {}: bits={}, steps=2^[{}..{}], max=2^{}",
+                     dim, bits, base_step, base_step + STEPS_PER_DIM - 1, bits);
         }
 
         println!("  [LGK] All basis points on curve: {}",
-                 basis_points.iter().all(|p| p.is_on_curve()));
+                 basis_points.iter().all(|p| p.is_on_curve() || p.inf));
+        println!("  [LGK] Scalar distances: ALL mod n (overflow-PROOF)");
+        println!("  [LGK] Hash: FULL normalize_x (CORRECT representation-invariant)");
+        println!("  [LGK] DP bits: {} (1 in 2^{} points is DP)", dp_bits, dp_bits);
 
         LatticeKangaroo {
             g, q: target_point, n,
             basis_scalars, basis_points,
             offset_point, offset_scalar,
             glv,
-            step_sizes, step_points,
+            step_points_pos, step_points_neg,
+            step_dists_pos, step_dists_neg,
             max_coeff,
-        }
-    }
-
-    /// Hash a Jacobian point to a (dimension, step_type) pair.
-    /// Uses the raw X coordinate for pseudo-random selection.
-    /// Skips dimensions with bits=0 (absorbed into offset).
-    #[inline]
-    fn hash_to_step(&self, point: &JacobianPoint) -> (usize, usize) {
-        if point.z.is_zero() { return (1, 0); }
-        let x0 = point.x.limbs[0];
-        let x1 = point.x.limbs[1];
-        // Pick dimension from 1-5 (skip dim 0 if its bits=0)
-        let mut dim = ((x0 as usize) % 5) + 1; // dims 1..5
-        // If this dimension has bits=0, try another
-        if self.max_coeff[dim] == 0 {
-            dim = ((x0 as usize) % 4) + 2; // dims 2..5
-        }
-        let step_type = (((x0 >> 16) | (x1 << 16)) % (STEPS_PER_DIM as u64)) as usize;
-        (dim, step_type)
-    }
-
-    /// Add a signed step to a Jacobian point in dimension `dim`.
-    /// step_val > 0: add step_val · Pᵢ
-    /// step_val < 0: add |step_val| · (-Pᵢ)
-    #[inline]
-    fn add_lattice_step(&self, point: &JacobianPoint, dim: usize, step_idx: usize, positive: bool) -> JacobianPoint {
-        let step_point = &self.step_points[dim][step_idx];
-        if positive {
-            point.add_affine(step_point)
-        } else {
-            point.add_affine(&step_point.neg())
+            active_dims,
+            dp_bits,
         }
     }
 
     /// Run the Lattice-Guided Kangaroo search.
     ///
-    /// Algorithm:
-    /// 1. Tame kangaroo: starts at offset·G, walks in 6D coefficient space
-    /// 2. Wild kangaroo: starts at Q, walks in 6D coefficient space
-    /// 3. When points collide (DP match), recover k from coefficient differences
+    /// v3: Uses FULL normalize_x for step selection. CORRECT deterministic walk.
+    /// v2: Track scalar distance as Fe (mod n). NEVER overflows.
     ///
-    /// Expected hops: O(√(max_component²) × 6) = O(6 × 2^(max_bits/2))
+    /// On collision: k = offset + tame_dist - wild_dist (mod n)
     pub fn solve(&self, max_hops: u64) -> LatticeKangarooResult {
         let start_time = Instant::now();
 
-        println!("\n  [LGK] === Lattice-Guided Kangaroo (6D Coefficient Space) ===");
-        println!("  [LGK] Tame: starts at offset·G (all coefficients = 0)");
-        println!("  [LGK] Wild: starts at Q (unknown coefficients)");
-        println!("  [LGK] Walking in 6D coefficient space with lattice-guided steps");
+        println!("\n  [LGK] === Lattice-Guided Kangaroo v3 (FULL normalize_x) ===");
+        println!("  [LGK] Tame: starts at offset·G (distance = 0)");
+        println!("  [LGK] Wild: starts at Q (distance = 0)");
+        println!("  [LGK] Active dims: {:?}", self.active_dims);
+        println!("  [LGK] Scalar tracking: Fe mod n (NO i64 overflow!)");
+        println!("  [LGK] Hash: FULL normalize_x (CORRECT!)");
+
+        let dp_mask: u64 = (1u64 << self.dp_bits.min(64)) - 1;
 
         // === TAME KANGAROO ===
-        // Starts at offset·G with all coefficients = 0
+        // Starts at offset·G with scalar distance = 0
         let mut tame_point = self.offset_point.to_jacobian();
-        let mut tame_coeffs = CoeffVector::zero();
+        let mut tame_dist = Fe::ZERO; // scalar distance mod n
 
         // Warmup: get away from starting point
         for _ in 0..500 {
-            let (dim, step_type) = self.hash_to_step(&tame_point);
-            let positive = tame_point.x.limbs[0] & 1 == 0;
-            tame_point = self.add_lattice_step(&tame_point, dim, step_type, positive);
-            let step_val = self.step_sizes[dim][step_type];
-            tame_coeffs.add_step(dim, if positive { step_val } else { -step_val });
+            let (dim, st, positive, _) = hash_to_step_lgk(
+                &tame_point, &self.active_dims, STEPS_PER_DIM, self.dp_bits
+            );
+            if positive {
+                tame_point = tame_point.add_affine(&self.step_points_pos[dim][st]);
+                tame_dist = tame_dist.add_mod_n(&self.step_dists_pos[dim][st]);
+            } else {
+                tame_point = tame_point.add_affine(&self.step_points_neg[dim][st]);
+                tame_dist = tame_dist.add_mod_n(&self.step_dists_neg[dim][st]);
+            }
         }
 
         // === WILD KANGAROO ===
-        // Starts at Q = k·G with unknown coefficients
+        // Starts at Q with scalar distance = 0
         let mut wild_point = self.q.to_jacobian();
-        let mut wild_coeffs = CoeffVector::zero();
+        let mut wild_dist = Fe::ZERO;
 
         // Warmup
         for _ in 0..500 {
-            let (dim, step_type) = self.hash_to_step(&wild_point);
-            let positive = wild_point.x.limbs[0] & 1 == 0;
-            wild_point = self.add_lattice_step(&wild_point, dim, step_type, positive);
-            let step_val = self.step_sizes[dim][step_type];
-            wild_coeffs.add_step(dim, if positive { step_val } else { -step_val });
+            let (dim, st, positive, _) = hash_to_step_lgk(
+                &wild_point, &self.active_dims, STEPS_PER_DIM, self.dp_bits
+            );
+            if positive {
+                wild_point = wild_point.add_affine(&self.step_points_pos[dim][st]);
+                wild_dist = wild_dist.add_mod_n(&self.step_dists_pos[dim][st]);
+            } else {
+                wild_point = wild_point.add_affine(&self.step_points_neg[dim][st]);
+                wild_dist = wild_dist.add_mod_n(&self.step_dists_neg[dim][st]);
+            }
         }
 
-        // DP storage
-        let mut tame_dps: HashMap<DPKey, CoeffVector> = HashMap::new();
-        let mut wild_dps: HashMap<DPKey, CoeffVector> = HashMap::new();
+        // DP storage: x-coordinate → scalar distance (Fe)
+        let mut tame_dps: HashMap<DPKey, Fe> = HashMap::new();
+        let mut wild_dps: HashMap<DPKey, Fe> = HashMap::new();
         let mut collisions = 0usize;
 
         let report_interval = if max_hops > 100_000 { 500_000 } else { 50_000 };
@@ -275,55 +328,63 @@ impl LatticeKangaroo {
 
             // === TAME HOP ===
             {
-                let (dim, step_type) = self.hash_to_step(&tame_point);
-                let positive = tame_point.x.limbs[0] & 1 == 0;
-                tame_point = self.add_lattice_step(&tame_point, dim, step_type, positive);
-                let step_val = self.step_sizes[dim][step_type];
-                tame_coeffs.add_step(dim, if positive { step_val } else { -step_val });
+                let (dim, st, positive, x_norm) = hash_to_step_lgk(
+                    &tame_point, &self.active_dims, STEPS_PER_DIM, self.dp_bits
+                );
+                if positive {
+                    tame_point = tame_point.add_affine(&self.step_points_pos[dim][st]);
+                    tame_dist = tame_dist.add_mod_n(&self.step_dists_pos[dim][st]);
+                } else {
+                    tame_point = tame_point.add_affine(&self.step_points_neg[dim][st]);
+                    tame_dist = tame_dist.add_mod_n(&self.step_dists_neg[dim][st]);
+                }
 
-                // Check DP
-                if !tame_point.z.is_zero() {
-                    if let Some(dp_key) = check_dp_jacobian_lgk(&tame_point) {
-                        if let Some(wc) = wild_dps.get(&dp_key) {
-                            collisions += 1;
-                            if let Some(k) = self.try_recover_from_collision(&tame_coeffs, wc) {
-                                let elapsed = start_time.elapsed().as_millis() as u64;
-                                return LatticeKangarooResult {
-                                    found: true, k: Some(k),
-                                    hops: total_hops, elapsed_ms: elapsed,
-                                    method: "Lattice-Guided Kangaroo".to_string(),
-                                };
-                            }
+                // Check DP using the ALREADY NORMALIZED x — no extra inversion needed!
+                if !tame_point.z.is_zero() && x_norm.limbs[0] & dp_mask == 0 {
+                    let dp_key = x_norm.to_bytes();
+                    if let Some(wd) = wild_dps.get(&dp_key) {
+                        collisions += 1;
+                        if let Some(k) = self.try_recover(&tame_dist, wd) {
+                            let elapsed = start_time.elapsed().as_millis() as u64;
+                            return LatticeKangarooResult {
+                                found: true, k: Some(k),
+                                hops: total_hops, elapsed_ms: elapsed,
+                                method: "LGK v3 (Fe scalar + full norm)".to_string(),
+                            };
                         }
-                        tame_dps.insert(dp_key, tame_coeffs.clone());
                     }
+                    tame_dps.insert(dp_key, tame_dist.clone());
                 }
             }
 
             // === WILD HOP ===
             {
-                let (dim, step_type) = self.hash_to_step(&wild_point);
-                let positive = wild_point.x.limbs[0] & 1 == 0;
-                wild_point = self.add_lattice_step(&wild_point, dim, step_type, positive);
-                let step_val = self.step_sizes[dim][step_type];
-                wild_coeffs.add_step(dim, if positive { step_val } else { -step_val });
+                let (dim, st, positive, x_norm) = hash_to_step_lgk(
+                    &wild_point, &self.active_dims, STEPS_PER_DIM, self.dp_bits
+                );
+                if positive {
+                    wild_point = wild_point.add_affine(&self.step_points_pos[dim][st]);
+                    wild_dist = wild_dist.add_mod_n(&self.step_dists_pos[dim][st]);
+                } else {
+                    wild_point = wild_point.add_affine(&self.step_points_neg[dim][st]);
+                    wild_dist = wild_dist.add_mod_n(&self.step_dists_neg[dim][st]);
+                }
 
-                // Check DP
-                if !wild_point.z.is_zero() {
-                    if let Some(dp_key) = check_dp_jacobian_lgk(&wild_point) {
-                        if let Some(tc) = tame_dps.get(&dp_key) {
-                            collisions += 1;
-                            if let Some(k) = self.try_recover_from_collision(tc, &wild_coeffs) {
-                                let elapsed = start_time.elapsed().as_millis() as u64;
-                                return LatticeKangarooResult {
-                                    found: true, k: Some(k),
-                                    hops: total_hops, elapsed_ms: elapsed,
-                                    method: "Lattice-Guided Kangaroo".to_string(),
-                                };
-                            }
+                // Check DP using the ALREADY NORMALIZED x
+                if !wild_point.z.is_zero() && x_norm.limbs[0] & dp_mask == 0 {
+                    let dp_key = x_norm.to_bytes();
+                    if let Some(td) = tame_dps.get(&dp_key) {
+                        collisions += 1;
+                        if let Some(k) = self.try_recover(td, &wild_dist) {
+                            let elapsed = start_time.elapsed().as_millis() as u64;
+                            return LatticeKangarooResult {
+                                found: true, k: Some(k),
+                                hops: total_hops, elapsed_ms: elapsed,
+                                method: "LGK v3 (Fe scalar + full norm)".to_string(),
+                            };
                         }
-                        wild_dps.insert(dp_key, wild_coeffs.clone());
                     }
+                    wild_dps.insert(dp_key, wild_dist.clone());
                 }
             }
 
@@ -347,51 +408,43 @@ impl LatticeKangaroo {
         LatticeKangarooResult {
             found: false, k: None,
             hops: max_hops, elapsed_ms: elapsed,
-            method: "Lattice-Guided Kangaroo".to_string(),
+            method: "LGK v3 (Fe scalar + full norm)".to_string(),
         }
     }
 
-    /// Try to recover k from a collision between tame and wild.
+    /// Try to recover k from a collision.
     ///
-    /// On collision: offset + Σ tame_cᵢ · sᵢ ≡ k + Σ wild_cᵢ · sᵢ (mod n)
-    /// => k ≡ offset + Σ (tame_cᵢ - wild_cᵢ) · sᵢ (mod n)
-    fn try_recover_from_collision(&self, tame: &CoeffVector, wild: &CoeffVector) -> Option<Fe> {
-        // k_candidate = offset + Σ (tame_cᵢ - wild_cᵢ) · sᵢ (mod n)
-        let mut k_candidate = self.offset_scalar;
-
-        for dim in 0..6 {
-            let diff = tame.c[dim] - wild.c[dim];
-            if diff == 0 { continue; }
-
-            let s_i = &self.basis_scalars[dim];
-
-            if diff > 0 {
-                // Add diff * sᵢ mod n
-                let diff_fe = Fe::from_u64(diff as u64);
-                let term = diff_fe.mul_mod_n(s_i);
-                k_candidate = k_candidate.add_mod_n(&term);
-            } else {
-                // Subtract |diff| * sᵢ mod n
-                let abs_diff = Fe::from_u64((-diff) as u64);
-                let term = abs_diff.mul_mod_n(s_i);
-                k_candidate = k_candidate.sub_mod_n(&term);
-            }
-        }
-
-        // Verify: k_candidate * G == Q?
-        let q_check = self.g.scalar_mul(&k_candidate);
+    /// On collision between tame (at distance tame_dist) and wild (at distance wild_dist):
+    ///   Positive collision: offset + tame_dist ≡ k + wild_dist (mod n)
+    ///     → k ≡ offset + tame_dist - wild_dist (mod n)
+    ///   Negative collision: offset - tame_dist ≡ k - wild_dist (mod n)
+    ///     → k ≡ -(offset + tame_dist + wild_dist) (mod n)
+    fn try_recover(&self, tame_dist: &Fe, wild_dist: &Fe) -> Option<Fe> {
+        // Case 1: Positive collision → k = offset + tame_dist - wild_dist
+        let k_pos = self.offset_scalar.add_mod_n(tame_dist).sub_mod_n(wild_dist);
+        let q_check = self.g.scalar_mul(&k_pos);
         if !q_check.inf && q_check.x == self.q.x {
-            println!("  [LGK] KEY VERIFIED: k·G.x matches Q.x!");
-            return Some(k_candidate);
+            println!("  [LGK] KEY VERIFIED (positive collision)!");
+            return Some(k_pos);
         }
 
-        // Check automorphism images (k might be λ·k_candidate, etc.)
-        let autos = self.glv.automorphism_scalars(&k_candidate);
-        for ak in &autos {
-            let verify = self.g.scalar_mul(ak);
-            if !verify.inf && verify.x == self.q.x {
-                println!("  [LGK] KEY FOUND via automorphism!");
-                return Some(ak.clone());
+        // Case 2: Negative collision → k = -(offset + tame_dist + wild_dist)
+        let k_neg = self.offset_scalar.add_mod_n(tame_dist).add_mod_n(wild_dist).neg_mod_n();
+        let q_check_neg = self.g.scalar_mul(&k_neg);
+        if !q_check_neg.inf && q_check_neg.x == self.q.x {
+            println!("  [LGK] KEY VERIFIED (negative collision)!");
+            return Some(k_neg);
+        }
+
+        // Check automorphism images for both
+        for k_candidate in [&k_pos, &k_neg] {
+            let autos = self.glv.automorphism_scalars(k_candidate);
+            for ak in &autos {
+                let verify = self.g.scalar_mul(ak);
+                if !verify.inf && verify.x == self.q.x {
+                    println!("  [LGK] KEY FOUND via automorphism!");
+                    return Some(ak.clone());
+                }
             }
         }
 
@@ -399,32 +452,28 @@ impl LatticeKangaroo {
     }
 }
 
-/// Check if a Jacobian point is a distinguished point.
-/// 
-/// Uses the NORMALIZED x-coordinate for the DP check.
-/// To avoid expensive inversion on every hop, we first do a cheap
-/// pre-filter on the raw X, and only normalize when the pre-filter passes.
-///
-/// DP condition: low DP_MASK_BITS bits of normalized x are zero.
-fn check_dp_jacobian_lgk(point: &JacobianPoint) -> Option<DPKey> {
-    if point.z.is_zero() { return None; }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // Quick pre-filter: check if raw X low bits suggest a possible DP.
-    // The raw X in Jacobian is pseudo-random, so checking low bits
-    // gives a rough filter. We use a LESS restrictive filter here
-    // (just low 4 bits) to avoid missing true DPs.
-    let x0 = point.x.limbs[0];
-    if x0 & 0xF != 0 { return None; }
+    #[test]
+    fn test_lgk_scalar_tracking() {
+        let g = Point::generator();
 
-    // Now normalize to get actual x = X/Z²
-    let z_inv = point.z.modinv();
-    let z_inv_sq = z_inv.mul(&z_inv);
-    let x_normalized = point.x.mul(&z_inv_sq);
-    let x_norm_bytes = x_normalized.to_bytes();
+        let offset = Fe::from_u64(1000);
+        let offset_point = g.scalar_mul(&offset);
+        assert!(offset_point.is_on_curve());
 
-    // Check distinguished point condition: low DP_MASK_BITS bits = 0
-    // For DP_MASK_BITS=8, this means the last byte must be zero
-    if x_norm_bytes[31] != 0 { return None; }
+        let s0 = Fe::from_u64(5);
+        let p0 = g.scalar_mul(&s0);
+        let step_val = Fe::from_u64(2);
+        let step_point = p0.scalar_mul(&step_val);
+        let step_dist = step_val.mul_mod_n(&s0);
 
-    Some(x_norm_bytes)
+        let total_point = offset_point.add(&step_point);
+        let total_scalar = offset.add_mod_n(&step_dist);
+
+        let verify = g.scalar_mul(&total_scalar);
+        assert!(verify.x == total_point.x, "Scalar tracking mismatch!");
+    }
 }

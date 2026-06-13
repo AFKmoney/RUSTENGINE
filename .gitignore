@@ -51,3 +51,5 @@ local-*
 
 # Agent context
 /agent-ctx/
+tool-results/
+tool-results/

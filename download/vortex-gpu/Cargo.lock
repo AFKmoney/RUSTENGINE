@@ -342,6 +342,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "titan-v16"
+version = "16.2.0"
+dependencies = [
+ "clap",
+ "cudarc",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "rayon",
+ "ripemd",
+ "sha2",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,20 +378,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vortex-gpu"
-version = "4.0.0"
-dependencies = [
- "clap",
- "cudarc",
- "hex",
- "num-bigint",
- "num-traits",
- "rayon",
- "ripemd",
- "sha2",
-]
 
 [[package]]
 name = "windows-link"
