@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 /// Number of precomputed step types per dimension
-const STEPS_PER_DIM: usize = 4;
+const STEPS_PER_DIM: usize = 16;
 
 /// Distinguished point mask bits (adaptive — set in new())
 const DP_MASK_BITS_DEFAULT: u32 = 10;
@@ -59,25 +59,32 @@ fn normalize_x(point: &JacobianPoint) -> Fe {
     point.x.mul(&z_inv_sq)
 }
 
-/// Hash a Jacobian point to a (dimension, step_type, direction) triple
-/// using FULLY NORMALIZED x-coordinate — CORRECT representation-invariant hash.
+/// Hash a Jacobian point to a (dimension, step_type) pair
+/// using RAW JACOBIAN X+Z for step selection (high entropy, prevents cycles).
+///
+/// CRITICAL FIX V16.3: No direction bit! The direction bit was causing
+/// 2-cycles: step +S at A, then step -S at A+S → back to A.
+/// Instead, we precompute both positive and negative step points as
+/// separate step types, eliminating the direction flip pattern.
 #[inline]
 fn hash_to_step_lgk(point: &JacobianPoint, active_dims: &[usize],
-                     num_step_types: usize, dp_bits: u32) -> (usize, usize, bool, Fe) {
+                     num_step_types: usize) -> (usize, usize) {
     if point.z.is_zero() || active_dims.is_empty() {
-        return (active_dims.first().copied().unwrap_or(1), 0, true, Fe::ZERO);
+        return (active_dims.first().copied().unwrap_or(1), 0);
     }
 
-    // FULL normalization — CORRECT and representation-invariant
-    let x_norm = normalize_x(point);
+    // Use RAW Jacobian X+Z for step selection — NOT normalize_x!
+    let hash = point.x.limbs[0]
+        .wrapping_mul(0x517cc1b727220a95)
+        .wrapping_add(point.x.limbs[1])
+        .wrapping_mul(0x6c62272e07bb0142)
+        .wrapping_add(point.z.limbs[0]);
 
-    let hash = x_norm.limbs[0];
     let dim_idx = (hash as usize) % active_dims.len();
     let dim = active_dims[dim_idx];
     let step_type = ((hash >> 16) as usize) % num_step_types;
-    let positive = (hash >> 32) & 1 == 0;
 
-    (dim, step_type, positive, x_norm)
+    (dim, step_type)
 }
 
 /// The Lattice-Guided Kangaroo solver v3
@@ -110,14 +117,10 @@ pub struct LatticeKangaroo {
     /// GLV decomposer for automorphism checks
     pub glv: GLVDecomposer,
 
-    /// Step EC points (+direction) for each (dim, step_type): step_val · P_dim
-    pub step_points_pos: [[Point; STEPS_PER_DIM]; 6],
-    /// Step EC points (-direction) for each (dim, step_type): -step_val · P_dim
-    pub step_points_neg: [[Point; STEPS_PER_DIM]; 6],
-    /// Step scalar distances (+direction) for each (dim, step_type): step_val · s_dim (mod n)
-    pub step_dists_pos: [[Fe; STEPS_PER_DIM]; 6],
-    /// Step scalar distances (-direction): n - step_val · s_dim (mod n)
-    pub step_dists_neg: [[Fe; STEPS_PER_DIM]; 6],
+    /// Step EC points for each (dim, step_type): positive [0..half), negative [half..STEPS_PER_DIM)
+    pub step_points: [[Point; STEPS_PER_DIM]; 6],
+    /// Step scalar distances for each (dim, step_type): positive [0..half), negative [half..STEPS_PER_DIM)
+    pub step_dists: [[Fe; STEPS_PER_DIM]; 6],
 
     /// Maximum coefficient per dimension (for range checking)
     pub max_coeff: [u64; 6],
@@ -174,17 +177,14 @@ impl LatticeKangaroo {
             4
         };
 
-        // Compute step sizes and precompute BOTH directions for each step
-        let mut step_points_pos: [[Point; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
+        // Compute step sizes and precompute ALL steps (positive and negative interleaved)
+        // No direction bit — positive and negative steps are separate step types
+        // STEPS_PER_DIM must be even: first half positive, second half negative
+        let half_steps = STEPS_PER_DIM / 2;
+        let mut step_points: [[Point; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
             std::array::from_fn(|_| Point::infinity())
         });
-        let mut step_points_neg: [[Point; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
-            std::array::from_fn(|_| Point::infinity())
-        });
-        let mut step_dists_pos: [[Fe; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
-            std::array::from_fn(|_| Fe::ZERO)
-        });
-        let mut step_dists_neg: [[Fe; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
+        let mut step_dists: [[Fe; STEPS_PER_DIM]; 6] = std::array::from_fn(|_| {
             std::array::from_fn(|_| Fe::ZERO)
         });
         let mut max_coeff: [u64; 6] = [0u64; 6];
@@ -194,10 +194,8 @@ impl LatticeKangaroo {
 
             if bits == 0 || basis_scalars[dim].is_zero() {
                 for j in 0..STEPS_PER_DIM {
-                    step_points_pos[dim][j] = Point::infinity();
-                    step_points_neg[dim][j] = Point::infinity();
-                    step_dists_pos[dim][j] = Fe::ZERO;
-                    step_dists_neg[dim][j] = Fe::ZERO;
+                    step_points[dim][j] = Point::infinity();
+                    step_dists[dim][j] = Fe::ZERO;
                 }
                 max_coeff[dim] = 0;
                 continue;
@@ -210,24 +208,22 @@ impl LatticeKangaroo {
                 1usize
             };
 
-            for j in 0..STEPS_PER_DIM {
+            for j in 0..half_steps {
                 let step_bits = base_step + j;
                 let step_val = 1u64 << step_bits.min(63);
 
                 // Precompute step_val · P_dim (positive direction)
                 let step_scalar = Fe::from_u64(step_val);
                 let step_pt = basis_points[dim].scalar_mul(&step_scalar);
-                step_points_pos[dim][j] = step_pt;
 
-                // Negative direction = negation of the positive point
-                step_points_neg[dim][j] = step_points_pos[dim][j].neg();
-
-                // Scalar distance: step_val · s_dim (mod n) — positive
+                // Positive step: step_types [0..half_steps)
+                step_points[dim][j] = step_pt.clone();
                 let dist_pos = step_scalar.mul_mod_n(&basis_scalars[dim]);
-                step_dists_pos[dim][j] = dist_pos;
+                step_dists[dim][j] = dist_pos;
 
-                // Negative direction distance: n - dist_pos (mod n)
-                step_dists_neg[dim][j] = dist_pos.neg_mod_n();
+                // Negative step: step_types [half_steps..STEPS_PER_DIM)
+                step_points[dim][j + half_steps] = step_pt.neg();
+                step_dists[dim][j + half_steps] = dist_pos.neg_mod_n();
             }
 
             max_coeff[dim] = if bits < 63 { 1u64 << bits } else { 1u64 << 62 };
@@ -247,8 +243,7 @@ impl LatticeKangaroo {
             basis_scalars, basis_points,
             offset_point, offset_scalar,
             glv,
-            step_points_pos, step_points_neg,
-            step_dists_pos, step_dists_neg,
+            step_points, step_dists,
             max_coeff,
             active_dims,
             dp_bits,
@@ -280,16 +275,11 @@ impl LatticeKangaroo {
 
         // Warmup: get away from starting point
         for _ in 0..500 {
-            let (dim, st, positive, _) = hash_to_step_lgk(
-                &tame_point, &self.active_dims, STEPS_PER_DIM, self.dp_bits
+            let (dim, st) = hash_to_step_lgk(
+                &tame_point, &self.active_dims, STEPS_PER_DIM
             );
-            if positive {
-                tame_point = tame_point.add_affine(&self.step_points_pos[dim][st]);
-                tame_dist = tame_dist.add_mod_n(&self.step_dists_pos[dim][st]);
-            } else {
-                tame_point = tame_point.add_affine(&self.step_points_neg[dim][st]);
-                tame_dist = tame_dist.add_mod_n(&self.step_dists_neg[dim][st]);
-            }
+            tame_point = tame_point.add_affine(&self.step_points[dim][st]);
+            tame_dist = tame_dist.add_mod_n(&self.step_dists[dim][st]);
         }
 
         // === WILD KANGAROO ===
@@ -299,16 +289,11 @@ impl LatticeKangaroo {
 
         // Warmup
         for _ in 0..500 {
-            let (dim, st, positive, _) = hash_to_step_lgk(
-                &wild_point, &self.active_dims, STEPS_PER_DIM, self.dp_bits
+            let (dim, st) = hash_to_step_lgk(
+                &wild_point, &self.active_dims, STEPS_PER_DIM
             );
-            if positive {
-                wild_point = wild_point.add_affine(&self.step_points_pos[dim][st]);
-                wild_dist = wild_dist.add_mod_n(&self.step_dists_pos[dim][st]);
-            } else {
-                wild_point = wild_point.add_affine(&self.step_points_neg[dim][st]);
-                wild_dist = wild_dist.add_mod_n(&self.step_dists_neg[dim][st]);
-            }
+            wild_point = wild_point.add_affine(&self.step_points[dim][st]);
+            wild_dist = wild_dist.add_mod_n(&self.step_dists[dim][st]);
         }
 
         // DP storage: x-coordinate → scalar distance (Fe)
@@ -320,7 +305,7 @@ impl LatticeKangaroo {
         let mut total_hops = 0u64;
         let mut last_report = 0u64;
 
-        println!("  [LGK] Starting search ({} max hops)...", max_hops);
+        println!("  [LGK] dp_mask = 0x{:x}, dp_bits = {}", dp_mask, self.dp_bits);
 
         // Main loop
         while total_hops < max_hops {
@@ -328,63 +313,61 @@ impl LatticeKangaroo {
 
             // === TAME HOP ===
             {
-                let (dim, st, positive, x_norm) = hash_to_step_lgk(
-                    &tame_point, &self.active_dims, STEPS_PER_DIM, self.dp_bits
+                let (dim, st) = hash_to_step_lgk(
+                    &tame_point, &self.active_dims, STEPS_PER_DIM
                 );
-                if positive {
-                    tame_point = tame_point.add_affine(&self.step_points_pos[dim][st]);
-                    tame_dist = tame_dist.add_mod_n(&self.step_dists_pos[dim][st]);
-                } else {
-                    tame_point = tame_point.add_affine(&self.step_points_neg[dim][st]);
-                    tame_dist = tame_dist.add_mod_n(&self.step_dists_neg[dim][st]);
-                }
+                tame_point = tame_point.add_affine(&self.step_points[dim][st]);
+                tame_dist = tame_dist.add_mod_n(&self.step_dists[dim][st]);
 
-                // Check DP using the ALREADY NORMALIZED x — no extra inversion needed!
-                if !tame_point.z.is_zero() && x_norm.limbs[0] & dp_mask == 0 {
-                    let dp_key = x_norm.to_bytes();
-                    if let Some(wd) = wild_dps.get(&dp_key) {
-                        collisions += 1;
-                        if let Some(k) = self.try_recover(&tame_dist, wd) {
-                            let elapsed = start_time.elapsed().as_millis() as u64;
-                            return LatticeKangarooResult {
-                                found: true, k: Some(k),
-                                hops: total_hops, elapsed_ms: elapsed,
-                                method: "LGK v3 (Fe scalar + full norm)".to_string(),
-                            };
+                // Check DP using NEW position's normalized x
+                if !tame_point.z.is_zero() {
+                    let new_x_norm = normalize_x(&tame_point);
+
+                    if new_x_norm.limbs[0] & dp_mask == 0 {
+                        let dp_key = new_x_norm.to_bytes();
+                        if let Some(wd) = wild_dps.get(&dp_key) {
+                            collisions += 1;
+                            if let Some(k) = self.try_recover(&tame_dist, wd) {
+                                let elapsed = start_time.elapsed().as_millis() as u64;
+                                return LatticeKangarooResult {
+                                    found: true, k: Some(k),
+                                    hops: total_hops, elapsed_ms: elapsed,
+                                    method: "LGK v3 (Fe scalar + full norm)".to_string(),
+                                };
+                            }
                         }
+                        tame_dps.insert(dp_key, tame_dist.clone());
                     }
-                    tame_dps.insert(dp_key, tame_dist.clone());
                 }
             }
 
             // === WILD HOP ===
             {
-                let (dim, st, positive, x_norm) = hash_to_step_lgk(
-                    &wild_point, &self.active_dims, STEPS_PER_DIM, self.dp_bits
+                let (dim, st) = hash_to_step_lgk(
+                    &wild_point, &self.active_dims, STEPS_PER_DIM
                 );
-                if positive {
-                    wild_point = wild_point.add_affine(&self.step_points_pos[dim][st]);
-                    wild_dist = wild_dist.add_mod_n(&self.step_dists_pos[dim][st]);
-                } else {
-                    wild_point = wild_point.add_affine(&self.step_points_neg[dim][st]);
-                    wild_dist = wild_dist.add_mod_n(&self.step_dists_neg[dim][st]);
-                }
+                wild_point = wild_point.add_affine(&self.step_points[dim][st]);
+                wild_dist = wild_dist.add_mod_n(&self.step_dists[dim][st]);
 
-                // Check DP using the ALREADY NORMALIZED x
-                if !wild_point.z.is_zero() && x_norm.limbs[0] & dp_mask == 0 {
-                    let dp_key = x_norm.to_bytes();
-                    if let Some(td) = tame_dps.get(&dp_key) {
-                        collisions += 1;
-                        if let Some(k) = self.try_recover(td, &wild_dist) {
-                            let elapsed = start_time.elapsed().as_millis() as u64;
-                            return LatticeKangarooResult {
-                                found: true, k: Some(k),
-                                hops: total_hops, elapsed_ms: elapsed,
-                                method: "LGK v3 (Fe scalar + full norm)".to_string(),
-                            };
+                // Check DP using NEW position's normalized x
+                if !wild_point.z.is_zero() {
+                    let new_x_norm = normalize_x(&wild_point);
+
+                    if new_x_norm.limbs[0] & dp_mask == 0 {
+                        let dp_key = new_x_norm.to_bytes();
+                        if let Some(td) = tame_dps.get(&dp_key) {
+                            collisions += 1;
+                            if let Some(k) = self.try_recover(td, &wild_dist) {
+                                let elapsed = start_time.elapsed().as_millis() as u64;
+                                return LatticeKangarooResult {
+                                    found: true, k: Some(k),
+                                    hops: total_hops, elapsed_ms: elapsed,
+                                    method: "LGK v3 (Fe scalar + full norm)".to_string(),
+                                };
+                            }
                         }
+                        wild_dps.insert(dp_key, wild_dist.clone());
                     }
-                    wild_dps.insert(dp_key, wild_dist.clone());
                 }
             }
 

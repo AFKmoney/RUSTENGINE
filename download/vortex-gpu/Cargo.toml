@@ -1,8 +1,8 @@
 [package]
 name = "titan-v16"
-version = "16.2.0"
+version = "16.3.0"
 edition = "2021"
-description = "TITAN V16.2 — 9-Layer Hyperstack ECDLP Solver for Bitcoin Puzzle #135 (FIXED)"
+description = "TITAN V16.3 — 9-Layer Hyperstack ECDLP Solver for Bitcoin Puzzle #135 (FIXED)"
 
 [dependencies]
 rayon = "1.10"

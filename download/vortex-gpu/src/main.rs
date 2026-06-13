@@ -883,6 +883,83 @@ fn print_key(k: &Fe) {
 }
 
 // ============================================================
+// LGK TEST: Direct test of Lattice-Guided Kangaroo with known key
+// ============================================================
+
+fn run_lgk_test() {
+    println!("\n╔══════════════════════════════════════════════════════════╗");
+    println!("║  TITAN V16 — LGK DIRECT TEST (known key)                ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+
+    let g = Point::generator();
+
+    // Test with multiple key sizes
+    let test_cases: Vec<(u64, u32)> = vec![
+        (0xFF, 8),
+        (0xFFFF, 16),
+        (0xFFFFFF, 24),
+        (0xFFFFFFFF, 32),
+    ];
+
+    for (k_val, _range_bits) in test_cases {
+        println!("\n  ════════════════════════════════════════════════════════");
+        let k = Fe::from_u64(k_val);
+        let q = g.scalar_mul(&k);
+
+        if !q.is_on_curve() {
+            println!("  ERROR: Q not on curve for k=0x{:x}!", k_val);
+            continue;
+        }
+
+        let actual_bits = 64 - k_val.leading_zeros();
+        println!("  LGK TEST: k = 0x{:x} ({} bits)", k_val, actual_bits);
+
+        // Build a simple lattice for testing
+        // Use 2D lattice: k ≈ offset + c1 * 1 + c2 * (2^(bits/2))
+        let half_bits = actual_bits / 2;
+        let offset = Fe::from_u64(k_val / 2);
+
+        let basis_scalars: [Fe; 6] = [
+            Fe::from_u64(0),
+            Fe::from_u64(1),                        // dim1: step of 1 in scalar space
+            Fe::power_of_2(half_bits as u32),       // dim2: large step
+            Fe::power_of_2((half_bits + 4) as u32), // dim3
+            Fe::from_u64(0),
+            Fe::from_u64(0),
+        ];
+        let max_coeff_bits: [u32; 6] = [0, half_bits + 2, half_bits + 2, half_bits, 0, 0];
+
+        let lgk = LatticeKangaroo::new(
+            q,
+            basis_scalars,
+            offset,
+            max_coeff_bits,
+        );
+
+        // Expected steps: ~4 * sqrt(2^max_coeff_bits_total)
+        let total_bits: u32 = max_coeff_bits.iter().sum();
+        let expected_steps = 4u64 * (1u64 << (total_bits / 2).min(30));
+        let max_hops = (expected_steps * 20).max(1_000_000).min(50_000_000);
+
+        println!("  Max hops: {}, Expected: ~{}", max_hops, expected_steps);
+
+        let result = lgk.solve(max_hops);
+
+        if result.found {
+            if let Some(found_k) = result.k {
+                let verify = g.scalar_mul(&found_k);
+                let correct = !verify.inf && verify.x == q.x;
+                println!("  LGK: FOUND! k match: {} ({} hops, {}ms)",
+                         correct, result.hops, result.elapsed_ms);
+            }
+        } else {
+            println!("  LGK: NOT FOUND ({} hops, {}ms)",
+                     result.hops, result.elapsed_ms);
+        }
+    }
+}
+
+// ============================================================
 // MAIN
 // ============================================================
 
@@ -983,8 +1060,11 @@ fn main() {
         "debug" => {
             kangaroo_debug::run_all_debug();
         }
+        "lgktest" => {
+            run_lgk_test();
+        }
         _ => {
-            eprintln!("Unknown mode: {}. Use: auto, pipeline, bsgw, annealing, tagteam, split, bloom, test, selftest, kangaroo, oracle", args.mode);
+            eprintln!("Unknown mode: {}. Use: auto, pipeline, bsgw, annealing, tagteam, split, bloom, test, selftest, kangaroo, oracle, lgktest", args.mode);
         }
     }
 
