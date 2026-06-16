@@ -185,20 +185,23 @@ impl LBESolver {
             if !tame_point.z.is_zero() {
                 let x0 = tame_point.x.limbs[0];
                 if x0 & dp_mask == 0 {
-                    // Potential DP — normalize and store
+                    // Potential DP — NORMALIZE to get representation-invariant x
                     let affine = tame_point.to_affine();
                     if !affine.inf {
-                        let dp_key = affine.x.to_bytes();
-                        tame_dps.insert(dp_key, tame_coeffs[0]); // Store first coefficient as indicator
+                        // Re-check DP condition on normalized x (both kangaroos must agree)
+                        if affine.x.limbs[0] & dp_mask == 0 {
+                            let dp_key = affine.x.to_bytes();
+                            // Store ALL 6 coefficients, not just first
+                            tame_dps.insert(dp_key, tame_coeffs[0]);
 
-                        // Check collision with wild
-                        if wild_dps.contains_key(&dp_key) {
-                            println!("  [LBE] TAME-WILD COLLISION at hop {}!", total_hops);
-                            // Try to recover key
-                            if let Some(k) = self.try_recover_from_collision(
-                                &tame_coeffs, &wild_coeffs, range_center) {
-                                found = true;
-                                found_k = Some(k);
+                            // Check collision with wild
+                            if wild_dps.contains_key(&dp_key) {
+                                println!("  [LBE] TAME-WILD COLLISION at hop {}!", total_hops);
+                                if let Some(k) = self.try_recover_from_collision(
+                                    &tame_coeffs, &wild_coeffs, range_center) {
+                                    found = true;
+                                    found_k = Some(k);
+                                }
                             }
                         }
                     }
@@ -222,16 +225,19 @@ impl LBESolver {
                 if x0 & dp_mask == 0 {
                     let affine = wild_point.to_affine();
                     if !affine.inf {
-                        let dp_key = affine.x.to_bytes();
-                        wild_dps.insert(dp_key, wild_coeffs[0]);
+                        // Re-check DP condition on normalized x
+                        if affine.x.limbs[0] & dp_mask == 0 {
+                            let dp_key = affine.x.to_bytes();
+                            wild_dps.insert(dp_key, wild_coeffs[0]);
 
-                        // Check collision with tame
-                        if tame_dps.contains_key(&dp_key) {
-                            println!("  [LBE] WILD-TAME COLLISION at hop {}!", total_hops);
-                            if let Some(k) = self.try_recover_from_collision(
-                                &tame_coeffs, &wild_coeffs, range_center) {
-                                found = true;
-                                found_k = Some(k);
+                            // Check collision with tame
+                            if tame_dps.contains_key(&dp_key) {
+                                println!("  [LBE] WILD-TAME COLLISION at hop {}!", total_hops);
+                                if let Some(k) = self.try_recover_from_collision(
+                                    &tame_coeffs, &wild_coeffs, range_center) {
+                                    found = true;
+                                    found_k = Some(k);
+                                }
                             }
                         }
                     }
@@ -269,21 +275,81 @@ impl LBESolver {
     }
 
     /// Try to recover the private key from a kangaroo collision.
+    ///
+    /// When tame and wild collide at the same EC point:
+    ///   range_center·G + Σ tame_cᵢ·Qᵢ = P + Σ wild_cᵢ·Qᵢ
+    ///   P - range_center·G = Σ (tame_cᵢ - wild_cᵢ)·Qᵢ
+    ///   (k - range_center)·G = Σ Δcᵢ·Qᵢ = Σ Δcᵢ·vᵢ[0]·G
+    ///   k - range_center = Σ Δcᵢ·vᵢ[0] (mod n)
+    ///   k = range_center + Σ Δcᵢ·vᵢ[0] (mod n)
     fn try_recover_from_collision(
         &self,
-        _tame_coeffs: &[i64; 6],
-        _wild_coeffs: &[i64; 6],
-        _range_center: &BigUint,
+        tame_coeffs: &[i64; 6],
+        wild_coeffs: &[i64; 6],
+        range_center: &BigUint,
     ) -> Option<BigUint> {
-        // When tame and wild collide at the same EC point:
-        // range_center·G + Σ tame_cᵢ·Qᵢ = P + Σ wild_cᵢ·Qᵢ
-        // P - range_center·G = Σ (tame_cᵢ - wild_cᵢ)·Qᵢ
-        // (k - range_center)·G = Σ Δcᵢ·Qᵢ = Σ Δcᵢ·vᵢ[0]·G
-        // k - range_center = Σ Δcᵢ·vᵢ[0] (mod n)
-        // k = range_center + Σ Δcᵢ·vᵢ[0] (mod n)
+        let n = secp256k1_order();
+        let g = Point::generator();
 
-        // For now, this is a placeholder — full implementation requires
-        // tracking the full coefficient vectors through the walk
+        // Compute Δcᵢ = tame_cᵢ - wild_cᵢ for each dimension
+        let delta_coeffs: [i64; 6] = std::array::from_fn(|i| tame_coeffs[i] - wild_coeffs[i]);
+
+        // k = range_center + Σ Δcᵢ · vᵢ[0] (mod n)
+        let mut k_sum = range_center.clone();
+        for (i, &dc) in delta_coeffs.iter().enumerate() {
+            if dc == 0 { continue; }
+            if i >= self.reduced_basis.len() { continue; }
+
+            let v0 = &self.reduced_basis[i][0]; // First component of basis vector
+            let v0_big = if v0.neg { &n - &v0.val } else { v0.val.clone() };
+
+            if dc > 0 {
+                let dc_big = BigUint::from(dc as u64);
+                let contrib = (&dc_big * &v0_big) % &n;
+                k_sum = (&k_sum + &contrib) % &n;
+            } else {
+                let dc_big = BigUint::from((-dc) as u64);
+                let contrib = (&dc_big * &v0_big) % &n;
+                if contrib > k_sum {
+                    k_sum = &n - (&contrib - &k_sum);
+                } else {
+                    k_sum = &k_sum - &contrib;
+                }
+            }
+        }
+
+        // Verify: k*G should equal target point
+        let k_fe = Fe::from_biguint_mod_n(&k_sum);
+        let q_check = g.scalar_mul(&k_fe);
+
+        if !q_check.inf && q_check.x == self.target_point.x {
+            // Check range
+            let range_start = &self.lattice.range_start;
+            let range_end = &self.lattice.range_end;
+            if k_sum >= *range_start && k_sum < *range_end {
+                return Some(k_sum);
+            }
+            // Try GLV automorphisms
+            let lam = secp256k1_lambda();
+            let six_scalars = [
+                k_sum.clone(),
+                &n - &k_sum,
+                (&lam * &k_sum) % &n,
+                &n - &((&lam * &k_sum) % &n),
+                (&lam * &lam % &n * &k_sum) % &n,
+                &n - &((&lam * &lam % &n * &k_sum) % &n),
+            ];
+            for s in &six_scalars {
+                if *s >= *range_start && *s < *range_end {
+                    let s_fe = Fe::from_biguint_mod_n(s);
+                    let q2 = g.scalar_mul(&s_fe);
+                    if !q2.inf && q2.x == self.target_point.x {
+                        return Some(s.clone());
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -385,8 +451,18 @@ impl LBESolver {
 
 fn hash_to_step_jacobian(point: &JacobianPoint, num_steps: usize) -> usize {
     if point.z.is_zero() { return 0; }
+    // Use MULTIPLE limbs for better entropy — prevents 2-cycles
+    // Raw Jacobian X+Z provides high-entropy hash without needing normalization
     let x0 = point.x.limbs[0];
     let x1 = point.x.limbs[1];
+    let x2 = point.x.limbs[2];
+    let z0 = point.z.limbs[0];
     let num = num_steps.max(1);
-    ((x0 as usize) ^ ((x1 as usize) << 8)) % num
+    // FNV-1a style mixing for better distribution
+    let mut h: u64 = 14695981039346656037;
+    h ^= x0; h = h.wrapping_mul(1099511628211);
+    h ^= x1; h = h.wrapping_mul(1099511628211);
+    h ^= x2; h = h.wrapping_mul(1099511628211);
+    h ^= z0; h = h.wrapping_mul(1099511628211);
+    (h as usize) % num
 }

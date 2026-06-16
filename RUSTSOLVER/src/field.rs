@@ -23,7 +23,7 @@ pub const P: [u64; 4] = [
 /// Group order N
 pub const N: [u64; 4] = [
     0xBFD25E8CD0364141,
-    0xBAAEDCE6AF48A03B,
+    0xBAEDCE6AF48A03BB,
     0xFFFFFFFFFFFFFFFE,
     0xFFFFFFFFFFFFFFFF,
 ];
@@ -39,8 +39,8 @@ pub const BETA: [u64; 4] = [
 /// Lambda: non-trivial cube root of unity mod N (lambda^3 = 1 mod N)
 pub const LAMBDA: [u64; 4] = [
     0xDF02967C1B23BD72,
-    0x122E22EA20816678,
-    0xA5261C028812645A,
+    0x812645A122E22EA2,
+    0x000000A5261C0288,
     0x5363AD4CC05C30E0,
 ];
 
