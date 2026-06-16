@@ -31,6 +31,7 @@ mod gpu;
 mod bip32;
 mod puzzle_db;
 mod analyzer;
+mod sparse;
 
 use clap::Parser;
 use field::Fe;
@@ -53,7 +54,7 @@ use num_bigint::BigUint;
 #[command(name = "vortex-gpu", version = "9.0.0",
           about = "VORTEX PRIME v9 — GPU Kangaroo + BIP-32 Seed Recovery + Multi-Target Brute-Force")]
 struct Args {
-    /// Search mode: kangaroo, bip32, brute, analyze, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu
+    /// Search mode: kangaroo, bip32, brute, sparse, analyze, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu
     #[arg(short, long, default_value = "kangaroo")]
     mode: String,
 
@@ -89,6 +90,10 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     path_index: usize,
 
+    /// Max Hamming weight for sparse search (--mode sparse)
+    #[arg(long, default_value_t = 10)]
+    max_weight: u32,
+
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
@@ -106,6 +111,11 @@ struct PuzzleTarget {
 
 fn get_puzzle(num: u32) -> PuzzleTarget {
     match num {
+        10 => PuzzleTarget {
+            address: "1NBxpwzGRihkbzpifKS7SUqa8vLQJrjEY1",
+            pubkey_hex: "",
+            range_bits: 10,
+        },
         25 => PuzzleTarget {
             address: "1Fo65aKq8s8iquMt6weF1rku1moWVEd68L",
             pubkey_hex: "0276e46a5a5b886f51aa7b91d18908a8c56128a7c3a8e4e4c1a970c1b4ba01d3e9",
@@ -126,12 +136,24 @@ fn get_puzzle(num: u32) -> PuzzleTarget {
             pubkey_hex: "0294d991ef2a38291416f959de8f80769e0a74d7f81a49267f50b2de1a34dbc2df",
             range_bits: 70,
         },
+        71 => PuzzleTarget {
+            address: "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
+            pubkey_hex: "",
+            range_bits: 71,
+        },
         135 => PuzzleTarget {
             address: "16RGFo6hjq9ym6Pj7N5H7L1NR1rVPJyw2v",
             pubkey_hex: "02145d2611c823a396ef6712ce0f712f09b9b4f3135e3e0aa3230fb9b6d08d1e16",
             range_bits: 135,
         },
-        _ => panic!("Unknown puzzle number {}. Supported: 25, 30, 66, 70, 135", num),
+        _ => {
+            // Generic puzzle: range_bits = puzzle number
+            PuzzleTarget {
+                address: "",
+                pubkey_hex: "",
+                range_bits: num,
+            }
+        }
     }
 }
 
@@ -673,29 +695,44 @@ fn main() {
     println!("  Pubkey: {}", puzzle.pubkey_hex);
     println!("  Range: [2^{}, 2^{})", puzzle.range_bits - 1, puzzle.range_bits);
 
-    // Parse pubkey
-    let pubkey_bytes_vec = hex::decode(&puzzle.pubkey_hex).expect("Invalid pubkey hex");
-    let mut pubkey_bytes = [0u8; 33];
-    pubkey_bytes.copy_from_slice(&pubkey_bytes_vec);
-
-    // Initialize Oracle (Invention 1)
-    let oracle = Round0Oracle::new(&pubkey_bytes);
-
-    // Initialize GLV (supporting infrastructure)
-    let glv = GLVDecomposer::new();
-    println!("\n  GLV: lambda verified, phi(G) on curve: {}", glv.phi_g.is_on_curve());
-
-    // Parse target point from pubkey
-    let target_point = decompress_point(&oracle.target_x, pubkey_bytes[0] == 0x03);
+    // Parse pubkey (some puzzles don't have exposed pubkeys)
+    let has_pubkey = !puzzle.pubkey_hex.is_empty();
+    let target_point = if has_pubkey {
+        let pubkey_bytes_vec = hex::decode(&puzzle.pubkey_hex).expect("Invalid pubkey hex");
+        let mut pubkey_bytes = [0u8; 33];
+        pubkey_bytes.copy_from_slice(&pubkey_bytes_vec);
+        let oracle = Round0Oracle::new(&pubkey_bytes);
+        let glv = GLVDecomposer::new();
+        println!("\n  GLV: lambda verified, phi(G) on curve: {}", glv.phi_g.is_on_curve());
+        decompress_point(&oracle.target_x, pubkey_bytes[0] == 0x03)
+    } else {
+        println!("\n  No pubkey available — using address-only modes (brute, sparse, bip32)");
+        None
+    };
 
     // Compute search range
     let range_bits = puzzle.range_bits;
     let range_start = Fe::power_of_2(range_bits - 1);
 
+    // For modes that don't need pubkey/oracle, we still need range_bits
+    // Oracle and GLV are only needed for pubkey-based modes
+    let oracle = if has_pubkey {
+        let pubkey_bytes_vec = hex::decode(&puzzle.pubkey_hex).expect("Invalid pubkey hex");
+        let mut pubkey_bytes = [0u8; 33];
+        pubkey_bytes.copy_from_slice(&pubkey_bytes_vec);
+        Some(Round0Oracle::new(&pubkey_bytes))
+    } else {
+        None
+    };
+
     // Select solver mode
     match args.mode.as_str() {
         "oracle" => {
-            run_oracle(&oracle);
+            if let Some(ref o) = oracle {
+                run_oracle(o);
+            } else {
+                println!("  ERROR: Oracle requires exposed pubkey.");
+            }
         }
         "zomega" | "z[omega]" => {
             run_zomega();
@@ -704,7 +741,7 @@ fn main() {
             if let Some(tp) = target_point {
                 run_kangaroo(&tp, &range_start, &Fe::power_of_2(range_bits), args.max_hops);
             } else {
-                println!("  ERROR: Cannot decompress target point.");
+                println!("  ERROR: Kangaroo requires exposed pubkey. Use --mode sparse or --mode brute for no-pubkey puzzles.");
             }
         }
         "lattice6d" | "6d" => {
@@ -715,24 +752,30 @@ fn main() {
             run_lattice(range_bits);
         }
         "pipeline" | "full" => {
-            if let Some(tp) = target_point {
-                run_pipeline(&oracle, &tp, range_bits, args.max_hops);
+            if let (Some(ref o), Some(tp)) = (&oracle, target_point) {
+                run_pipeline(o, &tp, range_bits, args.max_hops);
             } else {
-                run_oracle(&oracle);
-                let lifter = run_zomega();
-                run_lattice6d(range_bits, &lifter);
+                println!("  ERROR: Pipeline requires exposed pubkey.");
             }
         }
         "cpu" => {
-            if let Some(k) = cpu_solve_additive(&oracle.target_x, range_start, range_bits) {
-                println!("\n  ╔══════════════════════════════════════╗");
-                println!("  ║  KEY FOUND: {}  ║", k);
-                println!("  ╚══════════════════════════════════════╝");
+            if let Some(ref o) = oracle {
+                if let Some(k) = cpu_solve_additive(&o.target_x, range_start, range_bits) {
+                    println!("\n  ╔══════════════════════════════════════╗");
+                    println!("  ║  KEY FOUND: {}  ║", k);
+                    println!("  ╚══════════════════════════════════════╝");
+                }
+            } else {
+                println!("  ERROR: CPU mode requires exposed pubkey.");
             }
         }
         "cuda" | "gpu" => {
-            if let Some(k) = gpu_solve(&oracle.target_x, range_start, range_bits) {
-                println!("\n  KEY FOUND: {:?}", k.limbs);
+            if let Some(ref o) = oracle {
+                if let Some(k) = gpu_solve(&o.target_x, range_start, range_bits) {
+                    println!("\n  KEY FOUND: {:?}", k.limbs);
+                }
+            } else {
+                println!("  ERROR: GPU kangaroo requires exposed pubkey. Use --mode sparse for address-only.");
             }
         }
         "lbe" => {
@@ -750,6 +793,9 @@ fn main() {
         }
         "analyze" => {
             analyzer::run_full_analysis();
+        }
+        "sparse" => {
+            sparse::sparse_search(range_bits, args.max_weight, args.target);
         }
         "bip32" => {
             use bip32::SeedRecovery;
@@ -783,7 +829,7 @@ fn main() {
             run_brute_force(range_bits, args.target);
         }
         _ => {
-            eprintln!("Unknown mode: {}. Use: kangaroo, bip32, brute, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu", args.mode);
+            eprintln!("Unknown mode: {}. Use: kangaroo, bip32, brute, sparse, analyze, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu", args.mode);
         }
     }
 
