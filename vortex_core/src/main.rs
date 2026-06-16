@@ -795,7 +795,7 @@ fn main() {
             analyzer::run_full_analysis();
         }
         "sparse" => {
-            sparse::sparse_search(range_bits, args.max_weight, args.target);
+            sparse::sparse_search_fast(range_bits, args.max_weight, args.target);
         }
         "bip32" => {
             use bip32::SeedRecovery;
