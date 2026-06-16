@@ -28,6 +28,8 @@ mod lattice;
 mod lattice6d;
 mod lbe;
 mod gpu;
+mod bip32;
+mod puzzle_db;
 
 use clap::Parser;
 use field::Fe;
@@ -47,11 +49,11 @@ use num_bigint::BigUint;
 // ============================================================
 
 #[derive(Parser, Debug)]
-#[command(name = "vortex-gpu", version = "5.0.0",
-          about = "VORTEX PRIME v5 — Native u64x4 + 6D Lattice + Jacobian Kangaroo")]
+#[command(name = "vortex-gpu", version = "9.0.0",
+          about = "VORTEX PRIME v9 — GPU Kangaroo + BIP-32 Seed Recovery + Multi-Target Brute-Force")]
 struct Args {
-    /// Search mode: cpu, cuda, pipeline, oracle, zomega, kangaroo, lattice, lattice6d, lbe
-    #[arg(short, long, default_value = "pipeline")]
+    /// Search mode: kangaroo, bip32, brute, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu
+    #[arg(short, long, default_value = "kangaroo")]
     mode: String,
 
     /// Puzzle number (uses known address/pubkey)
@@ -73,6 +75,18 @@ struct Args {
     /// Max hops for kangaroo
     #[arg(long, default_value_t = 100_000_000)]
     max_hops: u64,
+
+    /// Seed for BIP-32 search (hex)
+    #[arg(long)]
+    seed: Option<String>,
+
+    /// Number of seeds to try in BIP-32 search
+    #[arg(long, default_value_t = 1_000_000)]
+    seed_count: u64,
+
+    /// Derivation path index (0-9 for preset paths)
+    #[arg(long, default_value_t = 0)]
+    path_index: usize,
 
     /// Enable verbose output
     #[arg(short, long)]
@@ -730,15 +744,164 @@ fn main() {
         "test" => {
             run_test_mode();
         }
+        "db" => {
+            puzzle_db::print_db_summary();
+        }
+        "bip32" => {
+            use bip32::SeedRecovery;
+            let recovery = SeedRecovery::new();
+
+            if let Some(seed_hex) = &args.seed {
+                // Direct seed search mode
+                let seed_bytes = hex::decode(seed_hex).unwrap_or_else(|_| {
+                    eprintln!("Invalid seed hex: {}", seed_hex);
+                    std::process::exit(1);
+                });
+                println!("  Searching from seed: {} ({} seeds, path index: {})",
+                         seed_hex, args.seed_count, args.path_index);
+                match recovery.search_seed_range(&seed_bytes, args.seed_count, args.path_index) {
+                    Some(found_seed) => {
+                        println!("\n  ╔══════════════════════════════════════════════════╗");
+                        println!("  ║  SEED FOUND!                                     ║");
+                        println!("  ║  {} ║", hex::encode(&found_seed));
+                        println!("  ╚══════════════════════════════════════════════════╝");
+                    }
+                    None => {
+                        println!("  No matching seed found in range.");
+                    }
+                }
+            } else {
+                // Full analysis mode
+                recovery.run();
+            }
+        }
+        "brute" => {
+            run_brute_force(range_bits, args.target);
+        }
         _ => {
-            eprintln!("Unknown mode: {}. Use: oracle, zomega, kangaroo, lattice, lattice6d, lbe, pipeline, cpu, cuda, test", args.mode);
+            eprintln!("Unknown mode: {}. Use: kangaroo, bip32, brute, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu", args.mode);
         }
     }
 
     println!("\n  NOUS SOMMES LES RECHERCHES.");
 }
 
-/// Test mode: validate native field arithmetic and EC operations
+/// Multi-Target Brute-Force: Address Generation
+/// For puzzles WITHOUT exposed public keys, we must:
+///   1. Generate k in range
+///   2. Compute k*G
+///   3. Compute hash160(k*G)
+///   4. Compare against ALL target hash160 values
+fn run_brute_force(range_bits: u32, target_puzzle: u32) {
+    println!("\n╔══════════════════════════════════════════════════════════╗");
+    println!("║  Multi-Target Brute-Force — Address Generation          ║");
+    println!("╚══════════════════════════════════════════════════════════╝\n");
+
+    use bip32::{check_key_against_puzzles, check_key_multi_target, hash160, pubkey_to_address};
+    use puzzle_db::{UNSOLVED_NO_PUBKEY, UNSOLVED_WITH_PUBKEY, get_all_target_hash160s};
+    use rayon::prelude::*;
+
+    let range_start = Fe::power_of_2(range_bits - 1);
+    let range_end = Fe::power_of_2(range_bits);
+
+    // Get all target hash160 values for multi-target search
+    let targets = get_all_target_hash160s();
+
+    println!("  Target puzzle: P{}", target_puzzle);
+    println!("  Range: [2^{}, 2^{})", range_bits - 1, range_bits);
+    println!("  Targets: {} unsolved addresses (brute-force)", UNSOLVED_NO_PUBKEY.len());
+    println!("  Targets: {} with pubkey (kangaroo-solvable)", UNSOLVED_WITH_PUBKEY.len());
+    println!("  Multi-target speedup: {:.1}x", (targets.len() as f64).sqrt());
+
+    let n_threads = rayon::current_num_threads();
+    println!("  Threads: {}", n_threads);
+
+    let total_keys = range_end.sub(&range_start);
+    println!("  Total keys to check: ~2^{}", total_keys.bit_length());
+
+    // Time estimate
+    let keys_per_sec_est = 3_900_000.0 * n_threads as f64; // ~3.9M ops/s per thread
+    let total_keys_f = 2_f64.powi(range_bits as i32 - 1);
+    let est_seconds = total_keys_f / keys_per_sec_est;
+    let est_years = est_seconds / (365.25 * 24.0 * 3600.0);
+    println!("  Estimated rate: {:.0} keys/s (CPU)", keys_per_sec_est);
+    println!("  Estimated time: {:.1e} years (CPU, single puzzle)", est_years);
+    println!("  With multi-target ({:.1}x): {:.1e} years", 
+             (targets.len() as f64).sqrt(), est_years / (targets.len() as f64).sqrt());
+    println!();
+    println!("  GPU acceleration: ~1B keys/s per RTX 4090");
+    println!("  GPU estimate: {:.1e} years (with multi-target)", 
+             total_keys_f / 1e9 / (365.25 * 24.0 * 3600.0) / (targets.len() as f64).sqrt());
+    println!();
+    println!("  Starting brute-force search...\n");
+
+    let start = Instant::now();
+    let found = std::sync::atomic::AtomicBool::new(false);
+    let result_lock = std::sync::Mutex::new(None::<(u32, Fe)>);
+    let keys_checked = std::sync::atomic::AtomicU64::new(0);
+
+    // Parallel search using Rayon
+    let stride = n_threads as u64;
+    let batch_size = 1_000_000u64; // Progress reporting interval
+
+    (0..n_threads).into_par_iter().for_each(|thread_id| {
+        if found.load(std::sync::atomic::Ordering::Relaxed) { return; }
+
+        let mut k = range_start.add(&Fe::from_u64(thread_id as u64));
+        let mut local_count = 0u64;
+
+        for _ in 0..batch_size {
+            if found.load(std::sync::atomic::Ordering::Relaxed) { break; }
+
+            // Multi-target check (fast: uses early-reject on first 4 bytes)
+            match check_key_multi_target(&k, &targets) {
+                Some(puzzle_num) => {
+                    found.store(true, std::sync::atomic::Ordering::Relaxed);
+                    *result_lock.lock().unwrap() = Some((puzzle_num, k));
+                    return;
+                }
+                None => {}
+            }
+
+            // Advance to next key (stride by n_threads for parallelism)
+            k = k.add(&Fe::from_u64(stride));
+            if k.cmp_val(&range_end.limbs) >= std::cmp::Ordering::Equal {
+                break;
+            }
+            local_count += 1;
+        }
+
+        keys_checked.fetch_add(local_count, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    let elapsed = start.elapsed();
+    let checked = keys_checked.load(std::sync::atomic::Ordering::Relaxed);
+    let rate = checked as f64 / elapsed.as_secs_f64();
+
+    if let Some((puzzle_num, key)) = result_lock.lock().unwrap().take() {
+        println!("\n  ╔══════════════════════════════════════════════════╗");
+        println!("  ║  KEY FOUND!                                      ║");
+        println!("  ║  Puzzle #{}                                      ║", puzzle_num);
+        println!("  ║  Key: {} ║", key);
+        println!("  ╚══════════════════════════════════════════════════╝");
+
+        // Verify by computing the address
+        let point = Point::generator().scalar_mul(&key);
+        let pubkey_bytes = point.to_bytes();
+        let address = pubkey_to_address(&pubkey_bytes);
+        let h = hash160(&pubkey_bytes);
+        println!("  Address: {}", address);
+        println!("  Hash160: {}", hex::encode(h));
+    } else {
+        println!("  No match found in this range segment");
+        println!("  Checked {} keys in {:.1}s ({:.0} keys/s)", checked, elapsed.as_secs_f64(), rate);
+        println!();
+        println!("  Note: Full range requires GPU acceleration");
+        println!("  Build: make -C RUSTSOLVER/cuda ptx");
+        println!("  Run:   ./vortex-gpu --mode brute -t {} --features cuda", target_puzzle);
+    };
+}
+
 fn run_test_mode() {
     println!("\n╔══════════════════════════════════════════════════════════╗");
     println!("║  TEST MODE: Validate Native u64x4 + Jacobian            ║");
