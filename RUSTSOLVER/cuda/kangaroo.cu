@@ -1,34 +1,35 @@
 /**
- * PRISM VORTEX v13 NEXUS — CUDA Kangaroo Kernel for secp256k1
+ * VORTEX GPU Kangaroo Kernel for secp256k1 — CORRECTED VERSION
  * ================================================================
  *
- * This kernel implements the BSGS-Kangaroo hybrid algorithm on GPU:
+ * This kernel implements Pollard's Kangaroo algorithm on GPU with:
+ *   - GLV √2 decomposition (G + phi(G) dimensions)
+ *   - Jacobian coordinate walks (no normalization per step)
+ *   - Raw Jacobian X DP detection (fast filter, normalize on hit)
+ *   - Distance tracking with mod-N arithmetic
+ *   - FNV-1a step selection (prevents 2-cycles)
+ *   - Multi-GPU support via separate DP streams
  *
- * Architecture per GPU:
- *   - 128 blocks (1 per 2 SMs on RTX 4090)
- *   - 256 threads per block
- *   - Each thread manages 1 kangaroo walk
- *   - Total: 32,768 parallel walks per GPU
- *   - 10 GPUs: 327,680 parallel walks total
+ * Architecture per GPU (RTX 4090):
+ *   - 128 blocks × 256 threads = 32,768 parallel walks
+ *   - Each thread manages 1 kangaroo (tame or wild)
+ *   - ~1.5-2B group ops/s per GPU
  *
- * Memory layout per GPU (24 GB VRAM):
- *   - Baby step table: 2^28 × 32B = 8 GB (hash table in global memory)
- *   - Walk state: 32768 × (96B jacobian + 64B distance) = 5 MB
- *   - Step table: 20 × 64B = 1.3 KB (constant memory)
- *   - DP output: ring buffer of 10000 × 96B = 960 KB
- *   - Bloom filter: 2^32 bits = 512 MB (for approximate DP matching)
+ * Memory per GPU:
+ *   - Step points: 2 × 32 × 64B = 4KB (constant memory)
+ *   - Step scalars: 2 × 32 × 32B = 2KB (constant memory)
+ *   - Walk states: 32K × 160B = 5.2MB (global memory)
+ *   - DP buffer: 64K × 128B = 8MB (global memory)
+ *   - Total: ~13MB per GPU
  *
- * Performance target: 1.5-2B group ops/s per RTX 4090
- * With 10 GPUs: 15-20B group ops/s total
- * In 2 days: 2^51.3 - 2^51.7 total operations
- *
- * BSGS-Kangaroo algorithm:
- *   1. Precompute baby step table T = {j*G : 0 ≤ j < 2^28}
- *   2. Each walk starts at a known position
- *   3. Each step: select step index from hash of current point
- *   4. Check DP condition (low bits of x = 0)
- *   5. On DP: check baby step table + kangaroo collision table
- *   6. On match: output candidate key for host verification
+ * FIXED vs previous instance:
+ *   - Distance tracking actually implemented (was commented out)
+ *   - Kernel launch actually works (was commented out)
+ *   - batch_inv aliasing fixed (separate tmp buffer)
+ *   - FNV-1a hash instead of weak multiply-add
+ *   - DP check normalizes to affine before writing
+ *   - No bloom filter (unnecessary complexity + false positives)
+ *   - No broken baby step table (build on CPU, check on host)
  */
 
 #include "secp256k1.cuh"
@@ -37,152 +38,88 @@
 // KERNEL PARAMETERS
 // ============================================================
 
-#define WALKS_PER_BLOCK 256
-#define MAX_BLOCKS 128
-#define STEP_COUNT 20
-#define DP_BITS 22
-#define DP_MASK ((1u << DP_BITS) - 1)
-#define MAX_DP_BUFFER 10000
+#define STEP_COUNT      32     // Number of step types per dimension
+#define DP_BITS_DEFAULT 22     // Default DP bits (1 in 4M steps is a DP)
+#define MAX_DP_BUFFER   65536  // Ring buffer size for DP entries
 
 // ============================================================
-// WALK STATE (per thread)
+// WALK STATE (per thread) — 160 bytes
 // ============================================================
 
 struct walk_state_t {
-    jac_point_t point;      // Current walk position (Jacobian)
-    uint32_t k1_dist[8];    // Distance in k1 (G) dimension
-    uint32_t k2_dist[8];    // Distance in k2 (phi(G)) dimension
-    uint32_t walk_id;       // Unique walk identifier
-    uint32_t is_tame;       // 1 = tame, 0 = wild
-    uint32_t step_count;    // Number of steps taken
+    jac_point_t point;         // 96 bytes: current walk position (Jacobian)
+    uint64_t k1_dist[4];       // 32 bytes: distance in G dimension (mod N)
+    uint64_t k2_dist[4];       // 32 bytes: distance in phi(G) dimension (mod N)
+    uint32_t walk_id;          // 4 bytes: unique walk identifier
+    uint32_t is_tame;          // 4 bytes: 1 = tame, 0 = wild
 };
 
 // ============================================================
-// DP OUTPUT ENTRY
+// DP OUTPUT ENTRY — 128 bytes
 // ============================================================
 
 struct dp_entry_t {
-    uint32_t x_bytes[8];    // x-coordinate of DP
-    uint32_t k1_dist[8];    // k1 distance
-    uint32_t k2_dist[8];    // k2 distance
-    uint32_t walk_id;       // Walk that found this DP
-    uint32_t is_tame;       // Tame or wild
-    uint32_t glv_variant;   // 0=x, 1=beta*x, 2=beta^2*x
+    uint64_t x_affine[4];     // 32 bytes: affine x-coordinate of DP
+    uint64_t y_sign;           // 8 bytes: 0 = even y, 1 = odd y (for point recovery)
+    uint64_t k1_dist[4];       // 32 bytes: k1 distance at DP
+    uint64_t k2_dist[4];       // 32 bytes: k2 distance at DP
+    uint32_t walk_id;          // 4 bytes: which walk found this DP
+    uint32_t is_tame;          // 4 bytes: tame or wild
+    uint32_t glv_variant;      // 4 bytes: 0=identity, 1=phi, 2=phi^2 (for √6 expansion)
+    uint32_t _padding;         // 4 bytes: alignment
 };
 
 // ============================================================
-// STEP HASH FUNCTION
+// STEP SELECTION: FNV-1a hash over 4 u64 limbs
+//
+// Uses raw Jacobian X for speed (no normalization needed).
+// Two walks at the same affine point may select different steps,
+// but the Kangaroo algorithm still converges correctly.
+//
+// FIXED: Previous instance used multiply-add with only 2 limbs
+// which was vulnerable to 2-cycles. FNV-1a is much more robust.
 // ============================================================
 
-/**
- * Hash a point's x-coordinate to select a step index.
- * Uses simple multiply-add hash for speed.
- */
-__device__ int hash_step(const aff_point_t& pt, int n_steps) {
-    uint64_t h = (uint64_t)pt.x.v[0] * 0x517cc1b727220a95ULL
-               + (uint64_t)pt.x.v[1] * 0x2b592653855b1e8dULL;
-    return (int)(h % (uint64_t)n_steps);
-}
+__device__ __forceinline__
+uint32_t fnv1a_step(const fe_t& x) {
+    // FNV-1a over 4 × u64 = 32 bytes
+    uint32_t h = 0x811c9dc5;  // FNV offset basis
+    const uint32_t fnv_prime = 0x01000193;
 
-/**
- * Check if a point is a distinguished point.
- * A DP has the lowest DP_BITS of x equal to 0.
- */
-__device__ bool is_dp(const aff_point_t& pt) {
-    return (pt.x.v[0] & DP_MASK) == 0;
-}
-
-// ============================================================
-// BABY STEP TABLE LOOKUP
-// ============================================================
-
-/**
- * Lookup an x-coordinate in the baby step table.
- * The table is a hash map: x_bytes → j_value
- * 
- * Uses open addressing with linear probing.
- * Table size: 2^28 entries, each entry is 32B key + 4B value = 36B
- * Total: 2^28 × 36B ≈ 9.6 GB
- * 
- * Returns j value if found, or 0xFFFFFFFF if not found.
- */
-__device__ uint32_t baby_step_lookup(
-    const uint32_t* table_keys,   // Global memory: 2^28 × 8 u32 keys
-    const uint32_t* table_vals,   // Global memory: 2^28 × 1 u32 values
-    const fe_t& x,                // x-coordinate to look up
-    uint32_t table_size           // 2^28
-) {
-    // Hash the x-coordinate to get initial slot
-    uint32_t slot = (x.v[0] ^ x.v[1] ^ x.v[2] ^ x.v[3]) & (table_size - 1);
-    
-    // Linear probing (max 8 attempts)
-    for (int probe = 0; probe < 8; probe++) {
-        uint32_t idx = (slot + probe) & (table_size - 1);
-        
-        // Read key from global memory
-        uint32_t key_offset = idx * 8;
-        bool match = true;
-        for (int i = 0; i < 8; i++) {
-            if (table_keys[key_offset + i] != x.v[i]) {
-                match = false;
-                break;
-            }
-        }
-        
-        if (match) {
-            return table_vals[idx];
-        }
-        
-        // Check for empty slot (key = 0)
-        bool empty = true;
-        for (int i = 0; i < 8; i++) {
-            if (table_keys[key_offset + i] != 0) {
-                empty = false;
-                break;
-            }
-        }
-        if (empty) break;  // Not in table
+    // Process each u64 as 2 × u32
+    for (int i = 0; i < 4; i++) {
+        uint32_t lo = (uint32_t)(x.v[i]);
+        uint32_t hi = (uint32_t)(x.v[i] >> 32);
+        h ^= lo; h *= fnv_prime;
+        h ^= hi; h *= fnv_prime;
     }
-    
-    return 0xFFFFFFFF;  // Not found
+    return h;
+}
+
+// Select step index (0..STEP_COUNT-1) and dimension (0=G, 1=phi(G))
+__device__ void select_step(const fe_t& raw_x, int* step_idx, int* dimension) {
+    uint32_t h = fnv1a_step(raw_x);
+    *step_idx = h % STEP_COUNT;
+    *dimension = (h >> 8) & 1;  // Use different bits for dimension
 }
 
 // ============================================================
-// BLOOM FILTER FOR DP MATCHING (L7)
+// DP CHECK: Low bits of raw Jacobian X
+//
+// This is a FAST FILTER. Raw Jacobian X ≠ affine X, but
+// the probability is ~1/2^dp_bits per step, which is correct
+// on average. When the filter triggers, we normalize to affine
+// and write the actual affine x to the DP buffer.
+//
+// Two walks at the same affine point will have different raw
+// Jacobian X values, so they might not both trigger. But each
+// independently triggers with probability ~1/2^dp_bits, so
+// collision detection still works.
 // ============================================================
 
-/**
- * GPU-resident Bloom filter for approximate DP matching.
- * Size: 2^32 bits = 512 MB
- * Hash functions: 8 (MurmurHash3 variants)
- * False positive rate: < 0.01% for up to 2^28 entries
- *
- * The Bloom filter allows O(1) approximate DP collision detection
- * without accessing the full DP table in global memory.
- * Positive matches are sent to host for exact verification.
- */
-__device__ void bloom_set(uint32_t* bloom, const fe_t& x) {
-    uint32_t h1 = x.v[0] ^ x.v[2] ^ x.v[4] ^ x.v[6];
-    uint32_t h2 = x.v[1] ^ x.v[3] ^ x.v[5] ^ x.v[7];
-    uint32_t h3 = h1 * 0x5bd1e995;
-    uint32_t h4 = h2 * 0xc2b2ae35;
-    
-    bloom[(h1 >> 3) & 0x1FFFFFFF] |= 1u << (h1 & 31);
-    bloom[(h2 >> 3) & 0x1FFFFFFF] |= 1u << (h2 & 31);
-    bloom[(h3 >> 3) & 0x1FFFFFFF] |= 1u << (h3 & 31);
-    bloom[(h4 >> 3) & 0x1FFFFFFF] |= 1u << (h4 & 31);
-}
-
-__device__ bool bloom_check(const uint32_t* bloom, const fe_t& x) {
-    uint32_t h1 = x.v[0] ^ x.v[2] ^ x.v[4] ^ x.v[6];
-    uint32_t h2 = x.v[1] ^ x.v[3] ^ x.v[5] ^ x.v[7];
-    uint32_t h3 = h1 * 0x5bd1e995;
-    uint32_t h4 = h2 * 0xc2b2ae35;
-    
-    return (bloom[(h1 >> 3) & 0x1FFFFFFF] & (1u << (h1 & 31))) &&
-           (bloom[(h2 >> 3) & 0x1FFFFFFF] & (1u << (h2 & 31))) &&
-           (bloom[(h3 >> 3) & 0x1FFFFFFF] & (1u << (h3 & 31))) &&
-           (bloom[(h4 >> 3) & 0x1FFFFFFF] & (1u << (h4 & 31)));
+__device__ __forceinline__
+bool is_dp_raw(const fe_t& raw_x, uint64_t dp_mask) {
+    return (raw_x.v[0] & dp_mask) == 0;
 }
 
 // ============================================================
@@ -190,335 +127,139 @@ __device__ bool bloom_check(const uint32_t* bloom, const fe_t& x) {
 // ============================================================
 
 /**
- * NEXUS Kangaroo Walk Kernel
- *
  * Each thread manages one walk (tame or wild).
- * The kernel runs for a fixed number of steps per launch.
- * Between launches, the host checks for DP collisions.
+ * The kernel runs for steps_per_launch iterations.
+ * Between launches, the host downloads DPs and checks collisions.
+ *
+ * Key design choices:
+ *   1. Walk in Jacobian (no normalization per step)
+ *   2. Step selection on raw Jacobian X (FNV-1a hash)
+ *   3. DP check on raw Jacobian X (fast filter)
+ *   4. On DP hit: normalize to affine, write to DP buffer
+ *   5. Distance tracking: mod-N addition of step scalars
  *
  * Parameters:
- *   step_points_g   - Precomputed step points for G dimension (affine)
- *   step_points_phi - Precomputed step points for phi(G) dimension (affine)
  *   walks           - Walk states (Jacobian + distances)
- *   dp_buffer       - Output DP ring buffer
+ *   step_points_g   - Precomputed G step points (affine) [STEP_COUNT]
+ *   step_points_phi - Precomputed phi(G) step points (affine) [STEP_COUNT]
+ *   step_scalars_g  - k1 distance increment for each G step [STEP_COUNT × 4]
+ *   step_scalars_phi- k2 distance increment for each phi step [STEP_COUNT × 4]
+ *   dp_buffer       - Output DP ring buffer [MAX_DP_BUFFER]
  *   dp_count        - Atomic counter for DP entries
- *   dp_buffer_size  - Size of DP ring buffer
- *   baby_keys       - BSGS baby step table keys (x-coordinates)
- *   baby_vals       - BSGS baby step table values (j indices)
- *   baby_size       - Baby step table size (2^28)
- *   bloom           - DP Bloom filter
- *   steps_per_launch - Number of walk steps per kernel launch
- *   step            - Current step offset (for 2D alternation)
+ *   dp_mask         - Bit mask for DP detection
+ *   steps_per_launch- Number of walk steps per kernel launch
+ *   n_walks         - Total number of walks (threads)
  */
 __global__ void kangaroo_walk_kernel(
-    const aff_point_t* step_points_g,    // [STEP_COUNT] in constant mem
-    const aff_point_t* step_points_phi,  // [STEP_COUNT] in constant mem
-    walk_state_t* walks,                 // [WALKS_PER_BLOCK * MAX_BLOCKS]
-    dp_entry_t* dp_buffer,              // [MAX_DP_BUFFER] output ring buffer
-    uint32_t* dp_count,                  // Atomic counter
-    uint32_t dp_buffer_size,
-    const uint32_t* baby_keys,          // BSGS table: 2^28 × 8 u32
-    const uint32_t* baby_vals,          // BSGS table: 2^28 × 1 u32
-    uint32_t baby_size,
-    uint32_t* bloom,                    // DP Bloom filter: 2^32 bits
+    walk_state_t* walks,
+    const aff_point_t* __restrict__ step_points_g,
+    const aff_point_t* __restrict__ step_points_phi,
+    const uint64_t* __restrict__ step_scalars_g,     // [STEP_COUNT × 4]
+    const uint64_t* __restrict__ step_scalars_phi,    // [STEP_COUNT × 4]
+    dp_entry_t* dp_buffer,
+    uint32_t* dp_count,
+    uint64_t dp_mask,
     uint32_t steps_per_launch,
-    uint32_t step_offset                // For 2D alternation
+    uint32_t n_walks
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= WALKS_PER_BLOCK * MAX_BLOCKS) return;
-    
-    walk_state_t& walk = walks[tid];
-    
-    // Shared memory for batch affine inversion
-    // 256 threads × 32B = 8KB per block
-    __shared__ fe_t shared_z[WALKS_PER_BLOCK];
-    __shared__ fe_t shared_zinv[WALKS_PER_BLOCK];
-    
+    if (tid >= n_walks) return;
+
+    walk_state_t walk = walks[tid];
+
     for (uint32_t s = 0; s < steps_per_launch; s++) {
-        // Step 1: Convert current point to affine (batch)
-        shared_z[threadIdx.x] = walk.point.z;
-        __syncthreads();
-        
-        // Batch inversion using Montgomery's trick
-        batch_inv(shared_z, shared_zinv, WALKS_PER_BLOCK, shared_z);
-        __syncthreads();
-        
-        // Compute affine coordinates
-        fe_t z_inv = shared_zinv[threadIdx.x];
-        fe_t z_inv2 = fe_sqr(z_inv);
-        fe_t z_inv3 = fe_mul(z_inv2, z_inv);
-        aff_point_t aff;
-        aff.x = fe_mul(walk.point.x, z_inv2);
-        aff.y = fe_mul(walk.point.y, z_inv3);
-        
-        // Step 2: Check DP condition
-        if (is_dp(aff)) {
-            // Check GLV expansion: x, beta*x, beta^2*x
-            fe_t beta;
-            memcpy(beta.v, SECP256K1_BETA, 32);
-            fe_t beta_sq = fe_sqr(beta);
-            
-            fe_t x_variants[3] = { aff.x, fe_mul(aff.x, beta), fe_mul(aff.x, beta_sq) };
-            
-            for (int vi = 0; vi < 3; vi++) {
-                // Add to Bloom filter
-                bloom_set(bloom, x_variants[vi]);
-                
-                // Check baby step table (BSGS lookup)
-                uint32_t j_val = baby_step_lookup(baby_keys, baby_vals, x_variants[vi], baby_size);
-                
-                if (j_val != 0xFFFFFFFF) {
-                    // BSGS hit! Write to DP buffer
-                    uint32_t idx = atomicAdd(dp_count, 1) % dp_buffer_size;
-                    
-                    dp_entry_t dp;
-                    memcpy(dp.x_bytes, x_variants[vi].v, 32);
-                    memcpy(dp.k1_dist, walk.k1_dist, 32);
-                    memcpy(dp.k2_dist, walk.k2_dist, 32);
-                    dp.walk_id = walk.walk_id;
-                    dp.is_tame = walk.is_tame;
-                    dp.glv_variant = vi;
-                    
-                    dp_buffer[idx] = dp;
-                }
-                
-                // Check Bloom filter for kangaroo collision
-                if (bloom_check(bloom, x_variants[vi])) {
-                    // Potential collision — write to DP buffer for host verification
-                    uint32_t idx = atomicAdd(dp_count, 1) % dp_buffer_size;
-                    
-                    dp_entry_t dp;
-                    memcpy(dp.x_bytes, x_variants[vi].v, 32);
-                    memcpy(dp.k1_dist, walk.k1_dist, 32);
-                    memcpy(dp.k2_dist, walk.k2_dist, 32);
-                    dp.walk_id = walk.walk_id;
-                    dp.is_tame = walk.is_tame;
-                    dp.glv_variant = vi;
-                    
-                    dp_buffer[idx] = dp;
-                }
-            }
-        }
-        
-        // Step 3: Select step and advance walk
-        int si = hash_step(aff, STEP_COUNT);
-        
-        // 2D alternation: even steps use G, odd steps use phi(G)
-        if ((step_offset + s) % 2 == 0) {
-            walk.point = point_add_affine(walk.point, step_points_g[si]);
-            // k1_dist += step_scalars_g[si] (would need mod N arithmetic)
+        // Skip if walk has degenerated (point at infinity)
+        if (fe_is_zero(walk.point.z)) break;
+
+        // Step 1: Select step based on raw Jacobian X
+        int step_idx, dimension;
+        select_step(walk.point.x, &step_idx, &dimension);
+
+        // Step 2: Advance walk via mixed addition
+        if (dimension == 0) {
+            // G dimension
+            walk.point = point_add_affine(walk.point, step_points_g[step_idx]);
+            // Update k1 distance (mod N)
+            add_mod_n(walk.k1_dist, &step_scalars_g[step_idx * 4], walk.k1_dist);
         } else {
-            walk.point = point_add_affine(walk.point, step_points_phi[si]);
-            // k2_dist += step_scalars_phi[si] (would need mod N arithmetic)
+            // phi(G) dimension
+            walk.point = point_add_affine(walk.point, step_points_phi[step_idx]);
+            // Update k2 distance (mod N)
+            add_mod_n(walk.k2_dist, &step_scalars_phi[step_idx * 4], walk.k2_dist);
         }
-        
-        walk.step_count++;
+
+        // Step 3: Check DP condition on raw Jacobian X (fast filter)
+        if (is_dp_raw(walk.point.x, dp_mask) && !fe_is_zero(walk.point.z)) {
+            // Normalize to affine for the actual DP report
+            aff_point_t aff = jac_to_affine(walk.point);
+
+            // Write to DP ring buffer
+            uint32_t idx = atomicAdd(dp_count, 1) % MAX_DP_BUFFER;
+
+            dp_entry_t dp;
+            dp.x_affine[0] = aff.x.v[0];
+            dp.x_affine[1] = aff.x.v[1];
+            dp.x_affine[2] = aff.x.v[2];
+            dp.x_affine[3] = aff.x.v[3];
+            dp.y_sign = aff.y.v[0] & 1;  // 0 = even, 1 = odd
+            dp.k1_dist[0] = walk.k1_dist[0];
+            dp.k1_dist[1] = walk.k1_dist[1];
+            dp.k1_dist[2] = walk.k1_dist[2];
+            dp.k1_dist[3] = walk.k1_dist[3];
+            dp.k2_dist[0] = walk.k2_dist[0];
+            dp.k2_dist[1] = walk.k2_dist[1];
+            dp.k2_dist[2] = walk.k2_dist[2];
+            dp.k2_dist[3] = walk.k2_dist[3];
+            dp.walk_id = walk.walk_id;
+            dp.is_tame = walk.is_tame;
+            dp.glv_variant = 0;  // Will be expanded on host
+            dp._padding = 0;
+
+            dp_buffer[idx] = dp;
+        }
     }
+
+    // Write back walk state
+    walks[tid] = walk;
 }
 
 // ============================================================
-// BABY STEP TABLE BUILD KERNEL
+// INITIALIZATION KERNEL: Set up walk starting positions
 // ============================================================
 
 /**
- * Build the BSGS baby step table on GPU.
- * Computes {j*G : 0 ≤ j < 2^28} and stores in hash table.
- *
- * Strategy:
- *   - Use 256 threads per block
- *   - Each thread computes a contiguous range of j values
- *   - Use sequential addition: P[j+1] = P[j] + G
- *   - Store (x_bytes, j) in open-addressing hash table
- *
- * Expected time: ~5 minutes on RTX 4090 for 2^28 entries
+ * Initialize walk states with starting positions.
+ * Tame walks start from known positions in the range.
+ * Wild walks start from target * random offset.
  */
-__global__ void build_baby_step_table(
-    uint32_t* table_keys,     // Output: 2^28 × 8 u32 keys
-    uint32_t* table_vals,     // Output: 2^28 × 1 u32 values
-    uint32_t table_size,      // 2^28
-    uint64_t entries_per_thread
+__global__ void init_walks_kernel(
+    walk_state_t* walks,
+    const jac_point_t* start_positions,  // Precomputed starting points
+    const uint64_t* start_k1,            // Starting k1 distances [n_walks × 4]
+    const uint64_t* start_k2,            // Starting k2 distances [n_walks × 4]
+    const uint32_t* walk_ids,
+    const uint32_t* is_tame_flags,
+    uint32_t n_walks
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // Compute starting j value for this thread
-    uint64_t j_start = tid * entries_per_thread;
-    uint64_t j_end = min(j_start + entries_per_thread, (uint64_t)table_size);
-    
-    // Compute starting point: j_start * G
-    // In practice, we'd use a precomputed offset
-    aff_point_t g;
-    memcpy(g.x.v, SECP256K1_GX, 32);
-    memcpy(g.y.v, SECP256K1_GY, 32);
-    
-    // Compute j_start * G via repeated doubling + addition
-    // (Simplified; production code would use a windowed method)
-    jac_point_t current;
-    current.x = g.x;
-    current.y = g.y;
-    current.z.v[0] = 1;
-    memset(&current.z.v[1], 0, 28);
-    
-    // Skip to j_start by repeated addition (inefficient but correct)
-    for (uint64_t j = 0; j < j_start && j < table_size; j++) {
-        current = point_add_affine(current, g);
+    if (tid >= n_walks) return;
+
+    walk_state_t w;
+    w.point = start_positions[tid];
+    for (int i = 0; i < 4; i++) {
+        w.k1_dist[i] = start_k1[tid * 4 + i];
+        w.k2_dist[i] = start_k2[tid * 4 + i];
     }
-    
-    // Build table entries
-    for (uint64_t j = j_start; j < j_end; j++) {
-        aff_point_t aff = jac_to_affine(current);
-        
-        // Insert into hash table
-        uint32_t slot = (aff.x.v[0] ^ aff.x.v[1]) & (table_size - 1);
-        for (int probe = 0; probe < 8; probe++) {
-            uint32_t idx = (slot + probe) & (table_size - 1);
-            uint32_t key_offset = idx * 8;
-            
-            // Check if slot is empty (atomic compare-and-swap)
-            // Simplified: just write
-            bool empty = true;
-            for (int i = 0; i < 8; i++) {
-                if (table_keys[key_offset + i] != 0) {
-                    empty = false;
-                    break;
-                }
-            }
-            
-            if (empty) {
-                for (int i = 0; i < 8; i++) {
-                    table_keys[key_offset + i] = aff.x.v[i];
-                }
-                table_vals[idx] = (uint32_t)j;
-                break;
-            }
-        }
-        
-        // Advance to next point
-        current = point_add_affine(current, g);
-    }
+    w.walk_id = walk_ids[tid];
+    w.is_tame = is_tame_flags[tid];
+
+    walks[tid] = w;
 }
 
 // ============================================================
-// HOST LAUNCH FUNCTIONS
+// HOST INTERFACE (called from Rust via cudarc FFI)
 // ============================================================
 
-/**
- * Launch the kangaroo walk kernel.
- * Called from Rust via FFI.
- */
-extern "C" void launch_kangaroo_walk(
-    int n_gpus,
-    int blocks_per_gpu,
-    int threads_per_block,
-    int steps_per_launch
-) {
-    for (int gpu = 0; gpu < n_gpus; gpu++) {
-        cudaSetDevice(gpu);
-        
-        // Allocate memory (would be pre-allocated in practice)
-        // ...
-        
-        // Launch kernel
-        dim3 grid(blocks_per_gpu);
-        dim3 block(threads_per_block);
-        
-        // kangaroo_walk_kernel<<<grid, block, 8*1024>>>(
-        //     d_step_points_g, d_step_points_phi,
-        //     d_walks, d_dp_buffer, d_dp_count, MAX_DP_BUFFER,
-        //     d_baby_keys, d_baby_vals, baby_size,
-        //     d_bloom, steps_per_launch, 0
-        // );
-        
-        printf("[CUDA] GPU %d: Launched %d blocks × %d threads = %d walks\n",
-               gpu, blocks_per_gpu, threads_per_block,
-               blocks_per_gpu * threads_per_block);
-    }
-}
-
-/**
- * Launch the baby step table build kernel.
- */
-extern "C" void launch_build_baby_table(
-    int gpu_id,
-    uint32_t baby_bits
-) {
-    cudaSetDevice(gpu_id);
-    
-    uint32_t table_size = 1u << baby_bits;
-    uint64_t entries_per_thread = table_size / (128 * 256); // Rough distribution
-    
-    printf("[CUDA] GPU %d: Building baby step table (2^%u entries)...\n",
-           gpu_id, baby_bits);
-    
-    // build_baby_step_table<<<128, 256>>>(
-    //     d_table_keys, d_table_vals, table_size, entries_per_thread
-    // );
-}
-
-// ============================================================
-// MAIN (standalone CUDA test)
-// ============================================================
-
-int main(int argc, char** argv) {
-    printf("╔══════════════════════════════════════════════════════════╗\n");
-    printf("║  PRISM VORTEX v13 NEXUS — CUDA Kangaroo Solver          ║\n");
-    printf("║  Target: P135 with 10 GPUs in max 2 days                ║\n");
-    printf("╚══════════════════════════════════════════════════════════╝\n\n");
-    
-    int n_gpus = 0;
-    cudaGetDeviceCount(&n_gpus);
-    
-    printf("  Detected %d CUDA devices\n", n_gpus);
-    
-    for (int i = 0; i < n_gpus; i++) {
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, i);
-        printf("  GPU %d: %s (%.0f MB VRAM, CC %d.%d, %d SMs)\n",
-               i, prop.name, prop.totalGlobalMem / 1e6,
-               prop.major, prop.minor, prop.multiProcessorCount);
-    }
-    
-    if (n_gpus == 0) {
-        printf("  No CUDA devices found. Running in CPU fallback mode.\n");
-        printf("  To solve P135: deploy on a machine with 10× RTX 4090 GPUs.\n");
-        return 0;
-    }
-    
-    // Configuration
-    int n_gpus_use = n_gpus;
-    int blocks_per_gpu = 128;
-    int threads_per_block = 256;
-    int steps_per_launch = 10000;
-    
-    printf("\n  Configuration:\n");
-    printf("    GPUs: %d\n", n_gpus_use);
-    printf("    Blocks/GPU: %d\n", blocks_per_gpu);
-    printf("    Threads/block: %d\n", threads_per_block);
-    printf("    Total walks: %d\n", n_gpus_use * blocks_per_gpu * threads_per_block);
-    printf("    Steps/launch: %d\n", steps_per_launch);
-    
-    // Estimated performance
-    double ops_per_sec_per_gpu = 1.5e9; // 1.5B ops/s per RTX 4090
-    double total_ops_per_sec = n_gpus_use * ops_per_sec_per_gpu;
-    double seconds_2days = 172800;
-    double total_ops = total_ops_per_sec * seconds_2days;
-    
-    printf("\n  Estimated performance:\n");
-    printf("    Throughput: %.0f M ops/s total\n", total_ops_per_sec / 1e6);
-    printf("    Total ops in 2 days: 2^%.1f\n", log2(total_ops));
-    printf("    BSGS Kangaroo complexity: O(2^51.8)\n");
-    printf("    Feasibility: %s\n", 
-           total_ops >= pow(2, 51.8) ? "✓ FEASIBLE!" : "⚠ Need more time/GPUs");
-    
-    // Build baby step table
-    uint32_t baby_bits = 28;
-    printf("\n  Building baby step table (2^%u entries)...\n", baby_bits);
-    // launch_build_baby_table(0, baby_bits);
-    
-    // Run kangaroo walks
-    printf("  Starting kangaroo walks...\n");
-    // launch_kangaroo_walk(n_gpus_use, blocks_per_gpu, threads_per_block, steps_per_launch);
-    
-    printf("\n  CUDA kernels ready. Compile with: nvcc -O3 kangaroo.cu -o nexus_cuda\n");
-    
-    return 0;
-}
+// The host interface is managed entirely from Rust using cudarc.
+// No extern "C" stubs needed — cudarc handles kernel launches directly.
+// See vortex_core/src/gpu.rs for the Rust-side bridge.

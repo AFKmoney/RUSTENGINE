@@ -1,23 +1,18 @@
-# PRISM VORTEX v13 NEXUS — CUDA Build Configuration
+# VORTEX GPU — CUDA Build Configuration
 # ==================================================
-# Build the CUDA kangaroo kernel for GPU acceleration.
+# Compile the CUDA kangaroo kernel to PTX for cudarc loading.
 #
 # Requirements:
 #   - CUDA Toolkit 11.0+ (nvcc compiler)
 #   - NVIDIA GPU with compute capability 7.0+ (Volta or newer)
-#   - 8+ GB VRAM per GPU for baby step table
 #
 # Build:
-#   make              # Build with default settings (CC 8.9 for RTX 4090)
-#   make SM=70        # Build for V100
+#   make              # Build PTX for RTX 4090 (CC 8.9)
 #   make SM=80        # Build for A100
 #   make SM=90        # Build for H100
-#   make debug        # Build with debug info
+#   make all          # Build PTX + standalone binary
 #
-# Run:
-#   ./nexus_cuda      # Standalone CUDA test
-#
-# The compiled binary can also be called from Rust via FFI.
+# The PTX file is loaded at runtime by the Rust GPU bridge (cudarc).
 
 NVCC = nvcc
 NVCC_FLAGS = -O3 -use_fast_math -Xcompiler -fPIC
@@ -31,32 +26,42 @@ SOURCES = kangaroo.cu
 HEADERS = secp256k1.cuh
 
 # Output
-TARGET = nexus_cuda
+PTX_TARGET = kangaroo.ptx
+BIN_TARGET = vortex_cuda
 
 # Debug flags
 ifeq ($(DEBUG), 1)
     NVCC_FLAGS += -G -g -lineinfo
 endif
 
-# Verbose
+# Verbose (show register usage)
 ifeq ($(VERBOSE), 1)
     NVCC_FLAGS += -Xptxas -v
 endif
 
-all: $(TARGET)
+# Default: build PTX only (for cudarc runtime loading)
+ptx: $(PTX_TARGET)
 
-$(TARGET): $(SOURCES) $(HEADERS)
+# Build standalone binary (for testing without Rust)
+bin: $(BIN_TARGET)
+
+all: ptx bin
+
+$(PTX_TARGET): $(SOURCES) $(HEADERS)
+	$(NVCC) $(NVCC_FLAGS) $(ARCH_FLAG) -ptx -o $@ $(SOURCES)
+
+$(BIN_TARGET): $(SOURCES) $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) $(ARCH_FLAG) -o $@ $(SOURCES) -lcudart
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(PTX_TARGET) $(BIN_TARGET)
 
 # Print GPU info
 info:
 	@nvidia-smi || echo "No NVIDIA GPU detected"
 
 # Quick test on small range
-test: $(TARGET)
-	./$(TARGET)
+test: $(BIN_TARGET)
+	./$(BIN_TARGET)
 
-.PHONY: all clean info test
+.PHONY: ptx bin all clean info test
