@@ -394,6 +394,32 @@ impl Fe {
         Fe::from_bytes(&arr)
     }
 
+    /// Modular inverse mod N: self^(N-2) mod N
+    /// Used for scalar arithmetic (BIP-32, key recovery)
+    pub fn modinv_n(&self) -> Self {
+        if self.is_zero() { panic!("modinv_n of zero"); }
+
+        // N - 2
+        let exp = Fe { limbs: [
+            0xBFD25E8CD036413F,
+            0xBAEDCE6AF48A03BB,
+            0xFFFFFFFFFFFFFFFC,
+            0xFFFFFFFFFFFFFFFF,
+        ]};
+
+        let mut result = Fe::ONE;
+        let mut base = *self;
+
+        let bits = exp.bit_length();
+        for i in (0..bits).rev() {
+            result = result.mul_mod_n(&result);
+            if exp.get_bit(i) {
+                result = result.mul_mod_n(&base);
+            }
+        }
+        result
+    }
+
     // ============================================================
     // BIT OPERATIONS
     // ============================================================

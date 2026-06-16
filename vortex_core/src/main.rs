@@ -30,6 +30,7 @@ mod lbe;
 mod gpu;
 mod bip32;
 mod puzzle_db;
+mod analyzer;
 
 use clap::Parser;
 use field::Fe;
@@ -52,7 +53,7 @@ use num_bigint::BigUint;
 #[command(name = "vortex-gpu", version = "9.0.0",
           about = "VORTEX PRIME v9 — GPU Kangaroo + BIP-32 Seed Recovery + Multi-Target Brute-Force")]
 struct Args {
-    /// Search mode: kangaroo, bip32, brute, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu
+    /// Search mode: kangaroo, bip32, brute, analyze, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu
     #[arg(short, long, default_value = "kangaroo")]
     mode: String,
 
@@ -746,6 +747,9 @@ fn main() {
         }
         "db" => {
             puzzle_db::print_db_summary();
+        }
+        "analyze" => {
+            analyzer::run_full_analysis();
         }
         "bip32" => {
             use bip32::SeedRecovery;
