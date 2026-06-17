@@ -797,6 +797,13 @@ fn main() {
         "sparse" => {
             sparse::sparse_search_fast(range_bits, args.max_weight, args.target);
         }
+        "sparse-gpu" => {
+            let solver = gpu::GpuSparseSolver::new(range_bits, args.max_weight, args.target);
+            let result = solver.run();
+            if result.found {
+                println!("\n  GPU sparse search found key in {:.2}s!", result.elapsed_secs);
+            }
+        }
         "bip32" => {
             use bip32::SeedRecovery;
             let recovery = SeedRecovery::new();
@@ -829,7 +836,7 @@ fn main() {
             run_brute_force(range_bits, args.target);
         }
         _ => {
-            eprintln!("Unknown mode: {}. Use: kangaroo, bip32, brute, sparse, analyze, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu", args.mode);
+            eprintln!("Unknown mode: {}. Use: kangaroo, bip32, brute, sparse, sparse-gpu, analyze, db, test, oracle, zomega, lattice, lattice6d, lbe, pipeline, cpu, cuda, gpu", args.mode);
         }
     }
 

@@ -5,6 +5,7 @@
 # Kernels:
 #   - kangaroo.cu: Pollard's Kangaroo with GLV √6
 #   - bruteforce.cu: Multi-target address checker (SHA256 + RIPEMD160)
+#   - sparse.cu: Sparse key brute-force with precomputed addition chains
 #
 # Requirements:
 #   - CUDA Toolkit 11.0+ (nvcc compiler)
@@ -28,13 +29,16 @@ ARCH_FLAG = -arch=sm_$(SM)
 # Source files
 KANGAROO_SRC = kangaroo.cu
 BRUTEFORCE_SRC = bruteforce.cu
+SPARSE_SRC = sparse.cu
 HEADERS = secp256k1.cuh
 
 # Output
 KANGAROO_PTX = kangaroo.ptx
 BRUTEFORCE_PTX = bruteforce.ptx
+SPARSE_PTX = sparse.ptx
 KANGAROO_BIN = vortex_kangaroo
 BRUTEFORCE_BIN = vortex_bruteforce
+SPARSE_BIN = vortex_sparse
 
 # Debug flags
 ifeq ($(DEBUG), 1)
@@ -47,7 +51,7 @@ ifeq ($(VERBOSE), 1)
 endif
 
 # Default: build all PTX
-ptx: $(KANGAROO_PTX) $(BRUTEFORCE_PTX)
+ptx: $(KANGAROO_PTX) $(BRUTEFORCE_PTX) $(SPARSE_PTX)
 
 # Build individual PTX files
 $(KANGAROO_PTX): $(KANGAROO_SRC) $(HEADERS)
@@ -56,8 +60,11 @@ $(KANGAROO_PTX): $(KANGAROO_SRC) $(HEADERS)
 $(BRUTEFORCE_PTX): $(BRUTEFORCE_SRC) $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) $(ARCH_FLAG) -ptx -o $@ $(BRUTEFORCE_SRC)
 
+$(SPARSE_PTX): $(SPARSE_SRC) $(HEADERS)
+	$(NVCC) $(NVCC_FLAGS) $(ARCH_FLAG) -ptx -o $@ $(SPARSE_SRC)
+
 # Build standalone binaries (for testing without Rust)
-bin: $(KANGAROO_BIN) $(BRUTEFORCE_BIN)
+bin: $(KANGAROO_BIN) $(BRUTEFORCE_BIN) $(SPARSE_BIN)
 
 $(KANGAROO_BIN): $(KANGAROO_SRC) $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) $(ARCH_FLAG) -o $@ $(KANGAROO_SRC) -lcudart
@@ -65,10 +72,13 @@ $(KANGAROO_BIN): $(KANGAROO_SRC) $(HEADERS)
 $(BRUTEFORCE_BIN): $(BRUTEFORCE_SRC) $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) $(ARCH_FLAG) -o $@ $(BRUTEFORCE_SRC) -lcudart
 
+$(SPARSE_BIN): $(SPARSE_SRC) $(HEADERS)
+	$(NVCC) $(NVCC_FLAGS) $(ARCH_FLAG) -o $@ $(SPARSE_SRC) -lcudart
+
 all: ptx bin
 
 clean:
-	rm -f $(KANGAROO_PTX) $(BRUTEFORCE_PTX) $(KANGAROO_BIN) $(BRUTEFORCE_BIN)
+	rm -f $(KANGAROO_PTX) $(BRUTEFORCE_PTX) $(SPARSE_PTX) $(KANGAROO_BIN) $(BRUTEFORCE_BIN) $(SPARSE_BIN)
 
 # Print GPU info
 info:
