@@ -1,55 +1,30 @@
-# dependencies
-node_modules
-/.pnp
-.pnp.*
-.yarn/*
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-.env*
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-# Rust build artifacts
+# Build artifacts
 target/
-Cargo.lock
+**/target/
+*.ptx
+*.o
+*.a
 
 # IDE
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 
-# Logs
-*.log
+# OS
+.DS_Store
+Thumbs.db
 
-# Local config
-local-*
-.claude
-.z-ai-config
+# Secrets / environment
+.env
+.env.local
 
-# Database
-*.db
+# Old / unused (not part of definitesolver)
+unused/
 
-# Skills
-/skills/
-
-# Upload dir
-/upload/
-
-# Agent context
-/agent-ctx/
-tool-results/
-tool-results/
+# Binaries
+*.exe
+vortex_kangaroo
+vortex_bruteforce
+vortex_sparse
