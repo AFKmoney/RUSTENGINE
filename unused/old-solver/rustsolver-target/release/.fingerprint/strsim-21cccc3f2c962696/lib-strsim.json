@@ -1,1 +1,0 @@
-{"rustc":16696009966390864400,"features":"[]","declared_features":"[]","target":14520901741915772287,"profile":11856702683587007857,"path":2380314915271620585,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"release/.fingerprint/strsim-21cccc3f2c962696/dep-lib-strsim","checksum":false}}],"rustflags":["-C","target-cpu=native"],"config":8247474407144887393,"compile_kind":0}

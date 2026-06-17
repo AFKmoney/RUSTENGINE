@@ -1,2 +1,0 @@
-…\sdanama > node -e "const axios = require('axios'); async function check() { try { const res = await axios.get('https://api.basescan.org/api?module=account&action=balance&address=0xA238DD80C259a72445c0e7D0aA99f82B2F0a1085&tag=latest'); console.log('STRIKE IDENTITY BALANCE (BASE):', res.data.result / 1e18); } catch(e) { console.log('Error:', e.message); } } check();"
-STRIKE IDENTITY BALANCE (BASE): NaN
